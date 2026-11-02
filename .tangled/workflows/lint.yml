@@ -1,0 +1,21 @@
+when:
+  - event: ["push", "pull_request"]
+    branch: ["main"]
+
+engine: microvm
+image: nixos
+
+environment:
+  CARGO_INCREMENTAL: "0"
+
+dependencies:
+  - rustup
+  - gcc
+  - cmake
+  - gnumake
+  - perl
+  - just
+
+steps:
+  - name: lint
+    command: just lint

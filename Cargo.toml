@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+arc-swap = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+fjall = "3"
+futures-util = "0.3"
+jiff = "0.2"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+metrics-process = "2"
+postcard = { version = "1", features = ["use-std"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "hickory-dns"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tantivy = "0.27"
+tempfile = "3"
+thiserror = "2"
+tikv-jemallocator = "0.7"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tokio-util = "0.7"
+tower-http = { version = "0.7", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+appview = { path = "crates/appview" }
+hubble = { path = "crates/hubble" }
+jetstream = { path = "crates/jetstream" }
+search = { path = "crates/search" }
+slingshot = { path = "crates/slingshot" }
+store = { path = "crates/store" }
+types = { path = "crates/types" }
+
+[workspace.lints.clippy]
+cast_lossless = "warn"

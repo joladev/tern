@@ -1,0 +1,16 @@
+[package]
+name = "appview"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+types.workspace = true

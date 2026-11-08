@@ -32,7 +32,7 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
 tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 appview = { path = "crates/appview" }
 hubble = { path = "crates/hubble" }

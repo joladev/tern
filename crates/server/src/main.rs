@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use jiff::SignedDuration;
 use store::Store;
 use tokio::sync::mpsc;
@@ -45,8 +45,16 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 struct Cli {
     #[arg(long, env = "TERN_DATA_DIR", default_value = "/data")]
     data_dir: PathBuf,
+    #[arg(long, env = "TERN_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -110,17 +118,21 @@ struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+    init_logging(cli.log_format);
     match cli.command {
         Command::Serve(args) => serve(&cli.data_dir, *args).await,
         Command::Rebuild => rebuild(&cli.data_dir),
         Command::Health { bind } => health(bind).await,
+    }
+}
+
+fn init_logging(format: LogFormat) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let logs = tracing_subscriber::fmt().with_env_filter(filter);
+    match format {
+        LogFormat::Text => logs.init(),
+        LogFormat::Json => logs.json().flatten_event(true).init(),
     }
 }
 

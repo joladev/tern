@@ -117,17 +117,14 @@ impl Reader {
         limit: usize,
     ) -> Result<Vec<Match>, Error> {
         let label = word.trim_end_matches('.');
-        let mut lookups = vec![
+        let lookups = [
             (
                 self.term_query(&Kind::Label.term(label)),
                 LABEL_BONUS + HANDLE_BONUS,
             ),
             (self.term_query(&Kind::Handle.term(word)), HANDLE_BONUS),
-            (self.name_query(word), 0),
+            (self.name_or_domain_query(word), 0),
         ];
-        if is_domain(word) {
-            lookups.push((self.term_query(&Kind::Domain.term(word)), 0));
-        }
 
         let mut ranked = Vec::new();
         for (query, bonus) in lookups {
@@ -164,13 +161,10 @@ impl Reader {
         words
             .iter()
             .map(|word| {
-                let mut queries = vec![
+                let queries = vec![
                     self.term_query(&Kind::Handle.term(word)),
-                    self.name_query(word),
+                    self.name_or_domain_query(word),
                 ];
-                if is_domain(word) {
-                    queries.push(self.term_query(&Kind::Domain.term(word)));
-                }
                 Box::new(BooleanQuery::union(queries)) as Box<dyn Query>
             })
             .collect()
@@ -179,6 +173,14 @@ impl Reader {
     fn term_query(&self, text: &str) -> Box<dyn Query> {
         let term = Term::from_field_text(self.fields.terms, text);
         Box::new(TermQuery::new(term, IndexRecordOption::Basic))
+    }
+
+    fn name_or_domain_query(&self, word: &str) -> Box<dyn Query> {
+        if is_domain(word) {
+            self.term_query(&Kind::Domain.term(word))
+        } else {
+            self.name_query(word)
+        }
     }
 
     fn name_query(&self, word: &str) -> Box<dyn Query> {

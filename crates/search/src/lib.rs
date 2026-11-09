@@ -250,6 +250,22 @@ mod tests {
     }
 
     #[test]
+    fn a_query_with_a_dot_matches_handles_not_names() {
+        let (reader, mut writer) = open_index();
+        writer
+            .upsert(&actor_with_handle("n", "nel.pet", Some("nel")), 1)
+            .unwrap();
+        writer
+            .upsert(&actor("x", Some("Nel Parker")), 1000)
+            .unwrap();
+        writer.commit().unwrap();
+
+        for query in ["nel.", "nel.p"] {
+            assert_eq!(handles(&reader, query, 10), ["nel.pet"], "{query}");
+        }
+    }
+
+    #[test]
     fn upserting_replaces_the_old_document() {
         let (reader, mut writer) = open_index();
         let mut account = actor("alice", None);

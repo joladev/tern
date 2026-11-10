@@ -52,13 +52,13 @@ impl From<RawProfile> for ProfileView {
         let profile = Profile {
             display_name: types::display_name(raw.display_name),
             avatar_cid: raw.avatar.as_deref().and_then(avatar_cid),
+        };
+        let enrichment = Enrichment {
+            followers: count(raw.followers_count),
             created_at: raw
                 .created_at
                 .and_then(|time| time.parse::<jiff::Timestamp>().ok())
                 .map(|time| time.as_second()),
-        };
-        let enrichment = Enrichment {
-            followers: count(raw.followers_count),
         };
         let handle = Handle::try_from(raw.handle).ok();
         ProfileView {

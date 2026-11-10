@@ -1,3 +1,5 @@
+mod migration;
+
 use std::iter::Peekable;
 use std::ops::Bound;
 use std::path::Path;
@@ -17,6 +19,8 @@ pub enum Error {
     Codec(#[from] postcard::Error),
     #[error("found a malformed DID in the store")]
     BadDid(#[source] types::ParseError),
+    #[error("the store has format {0}, which this build does not support")]
+    UnsupportedFormat(u32),
 }
 
 pub struct StoredAccount {
@@ -67,12 +71,14 @@ impl Store {
         let accounts = database.keyspace("accounts", KeyspaceCreateOptions::default)?;
         let enrichment = database.keyspace(ENRICHMENT, KeyspaceCreateOptions::default)?;
         let meta = database.keyspace("meta", KeyspaceCreateOptions::default)?;
-        Ok(Store {
+        let store = Store {
             database,
             accounts,
             enrichment,
             meta,
-        })
+        };
+        store.migrate()?;
+        Ok(store)
     }
 
     pub fn account(&self, did: &Did) -> Result<Option<Account>, Error> {
@@ -259,7 +265,10 @@ mod tests {
     fn deleting_an_account_removes_all_of_its_data() {
         let (_dir, store) = open();
         let alice = did("alice");
-        let enrichment = Enrichment { followers: 5 };
+        let enrichment = Enrichment {
+            followers: 5,
+            created_at: None,
+        };
         store.put_account(&alice, &account("alice.test")).unwrap();
         store.put_enrichment(&alice, enrichment, 10).unwrap();
 
@@ -272,7 +281,10 @@ mod tests {
     #[test]
     fn lists_accounts_with_their_enrichment_in_order_after_a_position() {
         let (_dir, store) = open();
-        let enrichment = Enrichment { followers: 5 };
+        let enrichment = Enrichment {
+            followers: 5,
+            created_at: None,
+        };
         for name in ["c", "a", "b"] {
             store.put_account(&did(name), &account("x.test")).unwrap();
         }
@@ -293,7 +305,10 @@ mod tests {
         for name in ["a", "c"] {
             store.put_account(&did(name), &account("x.test")).unwrap();
         }
-        let enrichment = |followers| Enrichment { followers };
+        let enrichment = |followers| Enrichment {
+            followers,
+            created_at: None,
+        };
         store.put_enrichment(&did("a"), enrichment(1), 10).unwrap();
         store.put_enrichment(&did("b"), enrichment(2), 10).unwrap();
         store.put_enrichment(&did("c"), enrichment(3), 10).unwrap();

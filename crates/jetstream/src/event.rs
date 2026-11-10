@@ -77,7 +77,6 @@ struct AccountStatus {
 struct ProfileRecord {
     display_name: Option<String>,
     avatar: Option<Blob>,
-    created_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,14 +161,8 @@ impl From<ProfileRecord> for Profile {
         Profile {
             display_name: types::display_name(record.display_name),
             avatar_cid: record.avatar.map(Blob::into_cid),
-            created_at: record.created_at.as_deref().and_then(parse_timestamp),
         }
     }
-}
-
-fn parse_timestamp(value: &str) -> Option<i64> {
-    let timestamp: jiff::Timestamp = value.parse().ok()?;
-    Some(timestamp.as_second())
 }
 
 #[cfg(test)]
@@ -204,7 +197,6 @@ mod tests {
         let profile = Profile {
             display_name: Some("Alice".to_owned()),
             avatar_cid: Some("bafkrei".to_owned()),
-            created_at: Some(1_731_773_329),
         };
         let kind = EventKind::Profile(profile);
         assert_eq!(frame, event(7, did(), "t", kind));

@@ -107,7 +107,6 @@ impl Account {
 pub struct Profile {
     pub display_name: Option<String>,
     pub avatar_cid: Option<String>,
-    pub created_at: Option<i64>,
 }
 
 pub fn display_name(name: Option<String>) -> Option<String> {
@@ -119,6 +118,7 @@ pub fn display_name(name: Option<String>) -> Option<String> {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Enrichment {
     pub followers: u64,
+    pub created_at: Option<i64>,
 }
 
 #[cfg(test)]

@@ -223,9 +223,8 @@ impl Writer {
         let now = now();
         let previous = self.store.enrichment_row(did)?;
         self.store.put_enrichment(did, enrichment, now)?;
-        let previous_score =
-            previous.map(|row| self.scorer.score(account, &row.enrichment, row.fetched_at));
-        let score_changed = previous_score != Some(self.scorer.score(account, &enrichment, now));
+        let previous_score = previous.map(|row| self.scorer.score(&row.enrichment, row.fetched_at));
+        let score_changed = previous_score != Some(self.scorer.score(&enrichment, now));
         if account_changed || score_changed {
             self.reindex(did, account, &enrichment, now)?;
         }
@@ -276,7 +275,7 @@ impl Writer {
             display_name: account.profile.display_name.clone(),
             avatar_cid: account.profile.avatar_cid.clone(),
         };
-        Some((actor, self.scorer.score(account, enrichment, now)))
+        Some((actor, self.scorer.score(enrichment, now)))
     }
 
     fn commit(&mut self) -> anyhow::Result<()> {
@@ -420,7 +419,10 @@ mod tests {
             did: did(name),
             handle: handle(name),
             profile: Profile::default(),
-            enrichment: Enrichment { followers },
+            enrichment: Enrichment {
+                followers,
+                created_at: None,
+            },
         }
     }
 
@@ -578,14 +580,11 @@ mod tests {
     fn a_lookup_rescores_an_account_that_only_got_older() {
         let mut fixture = fixture();
         let created = now() - 400 * 86_400;
-        let profile = Profile {
+        let enrichment = Enrichment {
+            followers: 0,
             created_at: Some(created),
-            ..Profile::default()
         };
-        fixture.apply(vec![
-            change(1, "ann", Change::Handle(handle("ann"))),
-            change(2, "ann", Change::Profile(profile.clone())),
-        ]);
+        fixture.apply(vec![change(1, "ann", Change::Handle(handle("ann")))]);
         let indexed = |name: &str| Actor {
             did: did(name),
             handle: handle(name).unwrap(),
@@ -594,7 +593,7 @@ mod tests {
         };
         fixture
             .store
-            .put_enrichment(&did("ann"), Enrichment::default(), created)
+            .put_enrichment(&did("ann"), enrichment, created)
             .unwrap();
         fixture.writer.index.upsert(&indexed("ann"), 0).unwrap();
         fixture.writer.index.upsert(&indexed("anna"), 50).unwrap();
@@ -602,7 +601,7 @@ mod tests {
         assert_eq!(fixture.found("an"), ["anna.test", "ann.test"]);
 
         let ann = ProfileView {
-            profile,
+            enrichment,
             ..view("ann", 0)
         };
         fixture.apply(vec![looked_up(vec![("ann", Some(ann))])]);

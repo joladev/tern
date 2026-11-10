@@ -2925,6 +2925,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "tracing",
  "types",
 ]
 

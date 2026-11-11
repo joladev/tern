@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::sync::Arc;
 
+use crate::intersection::BoundedIntersection;
 use arc_swap::ArcSwap;
 use tantivy::columnar::Column;
 use tantivy::query::{BooleanQuery, EnableScoring, Query, TermQuery};
@@ -15,8 +16,8 @@ use crate::terms::{self, Kind};
 use crate::{Actor, Error};
 
 const HANDLE_BONUS: u64 = 150;
-
 const LABEL_BONUS: u64 = 500;
+const CANDIDATES_PER_RESULT: usize = 200;
 
 pub(crate) struct Snapshot {
     searcher: Searcher,
@@ -116,6 +117,7 @@ impl Reader {
         word: &str,
         limit: usize,
     ) -> Result<Vec<Match>, Error> {
+        let depth = limit * CANDIDATES_PER_RESULT;
         let label = word.trim_end_matches('.');
         let lookups = [
             (
@@ -123,7 +125,7 @@ impl Reader {
                 LABEL_BONUS + HANDLE_BONUS,
             ),
             (self.term_query(&Kind::Handle.term(word)), HANDLE_BONUS),
-            (self.name_or_domain_query(word), 0),
+            (self.name_or_domain_query(word, depth), 0),
         ];
 
         let mut ranked = Vec::new();
@@ -148,22 +150,23 @@ impl Reader {
         words: &[String],
         limit: usize,
     ) -> Result<Vec<Match>, Error> {
-        let all = BooleanQuery::intersection(self.word_queries(words));
+        let depth = limit * CANDIDATES_PER_RESULT;
+        let all = BoundedIntersection::new(self.word_queries(words, depth), depth);
         let mut matches = snapshot.top_matches(&all, limit)?;
         if matches.len() < limit {
-            let some = BooleanQuery::union(self.word_queries(words));
+            let some = BooleanQuery::union(self.word_queries(words, depth));
             matches.extend(snapshot.top_matches(&some, limit)?);
         }
         Ok(matches)
     }
 
-    fn word_queries(&self, words: &[String]) -> Vec<Box<dyn Query>> {
+    fn word_queries(&self, words: &[String], depth: usize) -> Vec<Box<dyn Query>> {
         words
             .iter()
             .map(|word| {
                 let queries = vec![
                     self.term_query(&Kind::Handle.term(word)),
-                    self.name_or_domain_query(word),
+                    self.name_or_domain_query(word, depth),
                 ];
                 Box::new(BooleanQuery::union(queries)) as Box<dyn Query>
             })
@@ -175,20 +178,20 @@ impl Reader {
         Box::new(TermQuery::new(term, IndexRecordOption::Basic))
     }
 
-    fn name_or_domain_query(&self, word: &str) -> Box<dyn Query> {
+    fn name_or_domain_query(&self, word: &str, depth: usize) -> Box<dyn Query> {
         if is_domain(word) {
             self.term_query(&Kind::Domain.term(word))
         } else {
-            self.name_query(word)
+            self.name_query(word, depth)
         }
     }
 
-    fn name_query(&self, word: &str) -> Box<dyn Query> {
+    fn name_query(&self, word: &str, depth: usize) -> Box<dyn Query> {
         let parts = terms::name_words(Some(word))
             .iter()
             .map(|part| self.term_query(&Kind::Word.term(part)))
             .collect();
-        Box::new(BooleanQuery::intersection(parts))
+        Box::new(BoundedIntersection::new(parts, depth))
     }
 
     fn actor(&self, searcher: &Searcher, address: DocAddress) -> Result<Actor, Error> {

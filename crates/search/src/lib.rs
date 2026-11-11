@@ -1,3 +1,4 @@
+mod intersection;
 mod reader;
 mod schema;
 mod terms;

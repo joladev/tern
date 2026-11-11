@@ -4,7 +4,7 @@ default:
 test:
     cargo nextest run --workspace --exclude integration
 
-test-integration:
+integration:
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'docker compose down --volumes --remove-orphans' EXIT

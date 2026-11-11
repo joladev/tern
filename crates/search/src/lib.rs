@@ -10,7 +10,7 @@ use types::{Did, Handle};
 pub use reader::Reader;
 pub use writer::Writer;
 
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

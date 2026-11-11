@@ -20,6 +20,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2"
 postcard = { version = "1", features = ["use-std"] }
+regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "hickory-dns"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

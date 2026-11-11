@@ -1,3 +1,5 @@
+mod slurs;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -99,7 +101,9 @@ impl Default for Account {
 
 impl Account {
     pub fn searchable_handle(&self) -> Option<&Handle> {
-        self.handle.as_ref().filter(|_| self.active)
+        self.handle
+            .as_ref()
+            .filter(|handle| self.active && !slurs::contains_slur(handle.as_str()))
     }
 }
 
@@ -141,6 +145,15 @@ mod tests {
         let name = display_name(Some("東".repeat(300))).unwrap();
         assert_eq!(name, "東".repeat(213));
         assert_eq!(display_name(Some(String::new())), None);
+    }
+
+    #[test]
+    fn an_account_whose_handle_has_a_slur_is_not_searchable() {
+        let account = Account {
+            handle: Some(Handle::try_from("coon.example".to_owned()).unwrap()),
+            ..Account::default()
+        };
+        assert!(account.searchable_handle().is_none());
     }
 
     #[test]

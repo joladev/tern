@@ -7,10 +7,11 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use jiff::Timestamp;
 use search::{Actor, Reader};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
-use types::{Did, Handle};
+use types::{Did, Handle, Label};
 
 use crate::telemetry::Exporter;
 
@@ -67,20 +68,61 @@ struct ActorView {
     display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     avatar: Option<String>,
+    labels: Vec<LabelView>,
 }
 
-impl From<Actor> for ActorView {
-    fn from(actor: Actor) -> ActorView {
+impl ActorView {
+    fn new(actor: Actor, now: Timestamp) -> ActorView {
         let avatar = actor
             .avatar_cid
             .map(|cid| format!("{AVATAR_BASE_URL}/{}/{cid}", actor.did));
+        let labels = actor
+            .labels
+            .into_iter()
+            .filter(|label| !has_expired(label, now))
+            .map(LabelView::from)
+            .collect();
         ActorView {
             did: actor.did,
             handle: actor.handle,
             display_name: actor.display_name,
             avatar,
+            labels,
         }
     }
+}
+
+#[derive(Serialize)]
+struct LabelView {
+    src: Did,
+    uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cid: Option<String>,
+    val: String,
+    cts: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exp: Option<String>,
+}
+
+impl From<Label> for LabelView {
+    fn from(label: Label) -> LabelView {
+        LabelView {
+            src: label.src,
+            uri: label.uri,
+            cid: label.cid,
+            val: label.val,
+            cts: label.cts,
+            exp: label.exp,
+        }
+    }
+}
+
+fn has_expired(label: &Label, now: Timestamp) -> bool {
+    label
+        .exp
+        .as_deref()
+        .and_then(|exp| exp.parse::<Timestamp>().ok())
+        .is_some_and(|exp| exp <= now)
 }
 
 async fn typeahead(
@@ -105,7 +147,11 @@ async fn typeahead(
 
     metrics::histogram!("tern_search_seconds").record(start.elapsed());
 
-    let actors = actors.into_iter().map(ActorView::from).collect();
+    let now = Timestamp::now();
+    let actors = actors
+        .into_iter()
+        .map(|actor| ActorView::new(actor, now))
+        .collect();
     Ok(Json(TypeaheadResponse { actors }))
 }
 
@@ -161,5 +207,38 @@ impl IntoResponse for XrpcError {
             }
         };
         (status, Json(XrpcErrorBody { error, message })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(exp: Option<&str>) -> Label {
+        Label {
+            src: Did::try_from("did:plc:labeler".to_owned()).unwrap(),
+            uri: "did:plc:alice".to_owned(),
+            cid: None,
+            val: "spam".to_owned(),
+            cts: "2026-01-01T00:00:00Z".to_owned(),
+            exp: exp.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn expired_labels_are_left_out() {
+        let actor = Actor {
+            did: Did::try_from("did:plc:alice".to_owned()).unwrap(),
+            handle: Handle::try_from("alice.test".to_owned()).unwrap(),
+            display_name: None,
+            avatar_cid: None,
+            labels: vec![label(Some("2026-02-01T00:00:00Z")), label(None)],
+        };
+        let now: Timestamp = "2026-03-01T00:00:00Z".parse().unwrap();
+
+        let view = ActorView::new(actor, now);
+
+        let exps: Vec<_> = view.labels.iter().map(|label| label.exp.clone()).collect();
+        assert_eq!(exps, [None]);
     }
 }

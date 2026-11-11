@@ -159,6 +159,10 @@ impl Writer {
         if let Some(cid) = &actor.avatar_cid {
             document.add_text(fields.avatar_cid, cid);
         }
+        if !actor.labels.is_empty() {
+            let labels = serde_json::to_string(&actor.labels).expect("labels always serialize");
+            document.add_text(fields.labels, labels);
+        }
         document.add_u64(fields.score, score);
 
         let terms = terms::account_terms(actor.handle.as_str(), actor.display_name.as_deref());

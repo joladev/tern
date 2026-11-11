@@ -6,7 +6,7 @@ use appview::ProfileView;
 use search::Actor;
 use store::{BackfillState, LabelOrigin, Store};
 use tokio::sync::mpsc::{self, error::TryRecvError};
-use types::{Account, Did, Enrichment, Handle, Profile};
+use types::{Account, Did, Enrichment, Handle, Label, Profile};
 
 use crate::lookup::Source;
 use crate::score::Scorer;
@@ -111,17 +111,19 @@ impl Writer {
             .accounts_after(rebuild.after.as_ref(), REBUILD_CHUNK)?;
         rebuild.after = rows.last().map(|row| row.did.clone());
 
+        let count = rows.len();
         let now = now();
-        for row in &rows {
-            let searchable = self.searchable(&row.did, &row.account, &row.enrichment, now);
+        for row in rows {
+            let searchable =
+                self.searchable(&row.did, &row.account, &row.enrichment, row.labels, now);
             if let Some((actor, score)) = searchable {
                 self.index.upsert_rebuilt(&actor, score)?;
             }
         }
-        metrics::counter!("tern_index_rebuilt_accounts_total").increment(rows.len() as u64);
+        metrics::counter!("tern_index_rebuilt_accounts_total").increment(count as u64);
         self.has_changes = true;
 
-        if rows.len() < REBUILD_CHUNK {
+        if count < REBUILD_CHUNK {
             self.finish_rebuild()?;
         }
         Ok(())
@@ -209,9 +211,11 @@ impl Writer {
         if account_changed {
             self.store.put_account(did, &account)?;
         }
-        self.store
+        let labels_changed = self
+            .store
             .put_labels(did, LabelOrigin::Appview, &view.labels)?;
-        self.apply_enrichment(did, &account, view.enrichment, account_changed)?;
+        let document_changed = account_changed || labels_changed;
+        self.apply_enrichment(did, &account, view.enrichment, document_changed)?;
         Ok(is_new)
     }
 
@@ -220,14 +224,14 @@ impl Writer {
         did: &Did,
         account: &Account,
         enrichment: Enrichment,
-        account_changed: bool,
+        document_changed: bool,
     ) -> anyhow::Result<()> {
         let now = now();
         let previous = self.store.enrichment_row(did)?;
         self.store.put_enrichment(did, enrichment, now)?;
         let previous_score = previous.map(|row| self.scorer.score(&row.enrichment, row.fetched_at));
         let score_changed = previous_score != Some(self.scorer.score(&enrichment, now));
-        if account_changed || score_changed {
+        if document_changed || score_changed {
             self.reindex(did, account, &enrichment, now)?;
         }
         Ok(())
@@ -256,7 +260,8 @@ impl Writer {
         enrichment: &Enrichment,
         now: i64,
     ) -> anyhow::Result<()> {
-        match self.searchable(did, account, enrichment, now) {
+        let labels = self.store.labels(did)?;
+        match self.searchable(did, account, enrichment, labels, now) {
             Some((actor, score)) => self.index.upsert(&actor, score)?,
             None => self.index.remove(did),
         }
@@ -268,6 +273,7 @@ impl Writer {
         did: &Did,
         account: &Account,
         enrichment: &Enrichment,
+        labels: Vec<Label>,
         now: i64,
     ) -> Option<(Actor, u64)> {
         let handle = account.searchable_handle()?;
@@ -276,6 +282,7 @@ impl Writer {
             handle: handle.clone(),
             display_name: account.profile.display_name.clone(),
             avatar_cid: account.profile.avatar_cid.clone(),
+            labels,
         };
         Some((actor, self.scorer.score(enrichment, now)))
     }
@@ -309,7 +316,7 @@ pub fn record_backfill(state: &BackfillState) {
 #[cfg(test)]
 mod tests {
     use store::{BackfillCounts, BackfillProgress};
-    use types::{Label, Profile};
+    use types::Profile;
 
     use super::*;
     use crate::score::Reach;
@@ -593,6 +600,7 @@ mod tests {
             handle: handle(name).unwrap(),
             display_name: None,
             avatar_cid: None,
+            labels: Vec::new(),
         };
         fixture
             .store
@@ -613,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lookup_stores_the_accounts_labels() {
+    fn a_lookup_stores_and_indexes_the_accounts_labels() {
         let mut fixture = fixture();
         fixture.apply(vec![change(1, "a", Change::Handle(handle("a")))]);
         let label = Label {
@@ -631,7 +639,12 @@ mod tests {
 
         fixture.apply(vec![looked_up(vec![("a", Some(a))])]);
 
-        assert_eq!(fixture.store.labels(&did("a")).unwrap(), [label]);
+        assert_eq!(
+            fixture.store.labels(&did("a")).unwrap(),
+            std::slice::from_ref(&label)
+        );
+        let found = fixture.reader.search("a.test", 1).unwrap();
+        assert_eq!(found[0].labels, [label]);
     }
 
     #[test]

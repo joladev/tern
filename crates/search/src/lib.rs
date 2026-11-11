@@ -6,12 +6,12 @@ mod writer;
 
 use std::path::Path;
 
-use types::{Did, Handle};
+use types::{Did, Handle, Label};
 
 pub use reader::Reader;
 pub use writer::Writer;
 
-const FORMAT: u32 = 5;
+const FORMAT: u32 = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -37,6 +37,7 @@ pub struct Actor {
     pub handle: Handle,
     pub display_name: Option<String>,
     pub avatar_cid: Option<String>,
+    pub labels: Vec<Label>,
 }
 
 pub fn open(path: &Path) -> Result<(Reader, Writer), Error> {
@@ -59,6 +60,7 @@ mod tests {
             handle: Handle::try_from(format!("{name}.bsky.social")).unwrap(),
             display_name: display_name.map(str::to_owned),
             avatar_cid: None,
+            labels: Vec::new(),
         }
     }
 

@@ -10,6 +10,7 @@ pub struct Fields {
     pub handle: Field,
     pub display_name: Field,
     pub avatar_cid: Field,
+    pub labels: Field,
     pub score: Field,
     pub terms: Field,
 }
@@ -27,6 +28,7 @@ pub fn build() -> (Schema, Fields) {
         handle: builder.add_text_field("handle", STORED),
         display_name: builder.add_text_field("display_name", STORED),
         avatar_cid: builder.add_text_field("avatar_cid", STORED),
+        labels: builder.add_text_field("labels", STORED),
         score: builder.add_u64_field(SCORE_FIELD, FAST),
         terms: builder.add_text_field("terms", terms_options),
     };

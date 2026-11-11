@@ -204,12 +204,19 @@ impl Reader {
         let handle = text(self.fields.handle)
             .and_then(|handle| Handle::try_from(handle.to_owned()).ok())
             .ok_or(Error::BadDocument("handle"))?;
+        let labels = match text(self.fields.labels) {
+            Some(labels) => {
+                serde_json::from_str(labels).map_err(|_| Error::BadDocument("labels"))?
+            }
+            None => Vec::new(),
+        };
 
         Ok(Actor {
             did,
             handle,
             display_name: text(self.fields.display_name).map(str::to_owned),
             avatar_cid: text(self.fields.avatar_cid).map(str::to_owned),
+            labels,
         })
     }
 }

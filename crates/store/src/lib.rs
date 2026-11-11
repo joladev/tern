@@ -28,6 +28,7 @@ pub struct StoredAccount {
     pub did: Did,
     pub account: Account,
     pub enrichment: Enrichment,
+    pub labels: Vec<Label>,
 }
 
 pub struct Scan {
@@ -129,30 +130,26 @@ impl Store {
         did: &Did,
         origin: LabelOrigin,
         labels: &[Label],
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let key = labels_key(did, &origin);
+        let stored = self.labels.get(&key)?;
         if labels.is_empty() {
-            if self.labels.contains_key(&key)? {
+            if stored.is_some() {
                 self.labels.remove(key)?;
             }
-            return Ok(());
+            return Ok(stored.is_some());
         }
         let value = postcard::to_stdvec(labels)?;
-        Ok(self.labels.insert(key, value)?)
+        if stored.as_deref() == Some(value.as_slice()) {
+            return Ok(false);
+        }
+        self.labels.insert(key, value)?;
+        Ok(true)
     }
 
     pub fn labels(&self, did: &Did) -> Result<Vec<Label>, Error> {
-        let mut labels = Vec::new();
-        for entry in self.labels.prefix(labels_prefix(did)) {
-            let (_, bytes) = entry.into_inner()?;
-            let from_origin: Vec<Label> = postcard::from_bytes(&bytes)?;
-            for label in from_origin {
-                if !labels.contains(&label) {
-                    labels.push(label);
-                }
-            }
-        }
-        Ok(labels)
+        let entries = self.labels.prefix(labels_prefix(did));
+        merge_labels(entries.map(|entry| entry.into_inner()))
     }
 
     pub fn put_enrichment(
@@ -175,14 +172,22 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<StoredAccount>, Error> {
         let rows = self.rows_after(after, limit)?;
-        Ok(rows
-            .into_iter()
-            .map(|(did, account, row)| StoredAccount {
-                did,
-                account,
-                enrichment: row.map(|row| row.enrichment).unwrap_or_default(),
+        let mut labels = self
+            .labels
+            .range::<&str, _>(following(after))
+            .map(|entry| entry.into_inner())
+            .peekable();
+        rows.into_iter()
+            .map(|(did, account, row)| {
+                let labels = labels_for(&mut labels, &did)?;
+                Ok(StoredAccount {
+                    did,
+                    account,
+                    enrichment: row.map(|row| row.enrichment).unwrap_or_default(),
+                    labels,
+                })
             })
-            .collect())
+            .collect()
     }
 
     pub fn scan_stale(
@@ -268,6 +273,43 @@ fn value_for(
 fn following(did: Option<&Did>) -> (Bound<&str>, Bound<&str>) {
     let start = did.map_or(Bound::Unbounded, |did| Bound::Excluded(did.as_str()));
     (start, Bound::Unbounded)
+}
+
+fn labels_for(
+    entries: &mut Peekable<impl Iterator<Item = fjall::Result<KvPair>>>,
+    did: &Did,
+) -> Result<Vec<Label>, Error> {
+    let prefix = labels_prefix(did);
+    let before = |entry: &fjall::Result<KvPair>| {
+        entry
+            .as_ref()
+            .map_or(true, |(key, _)| &**key < prefix.as_slice())
+    };
+    while let Some(entry) = entries.next_if(before) {
+        entry?;
+    }
+    let owned = std::iter::from_fn(|| {
+        entries.next_if(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|(key, _)| key.starts_with(&prefix))
+        })
+    });
+    merge_labels(owned)
+}
+
+fn merge_labels(entries: impl Iterator<Item = fjall::Result<KvPair>>) -> Result<Vec<Label>, Error> {
+    let mut labels = Vec::new();
+    for entry in entries {
+        let (_, bytes) = entry?;
+        let from_origin: Vec<Label> = postcard::from_bytes(&bytes)?;
+        for label in from_origin {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+    Ok(labels)
 }
 
 fn labels_prefix(did: &Did) -> Vec<u8> {
@@ -370,6 +412,34 @@ mod tests {
 
         store.put_labels(&alice, LabelOrigin::Appview, &[]).unwrap();
         assert!(store.labels(&alice).unwrap().is_empty());
+    }
+
+    #[test]
+    fn putting_labels_reports_whether_they_changed() {
+        let (_dir, store) = open();
+        let alice = did("alice");
+        let put = |labels: &[Label]| store.put_labels(&alice, LabelOrigin::Appview, labels);
+
+        assert!(put(&[label("spam")]).unwrap());
+        assert!(!put(&[label("spam")]).unwrap());
+        assert!(put(&[]).unwrap());
+        assert!(!put(&[]).unwrap());
+    }
+
+    #[test]
+    fn listed_accounts_carry_their_labels() {
+        let (_dir, store) = open();
+        for name in ["a", "b", "c"] {
+            store.put_account(&did(name), &account("x.test")).unwrap();
+        }
+        store
+            .put_labels(&did("b"), LabelOrigin::Appview, &[label("spam")])
+            .unwrap();
+
+        let rows = store.accounts_after(Some(&did("a")), 10).unwrap();
+
+        let found: Vec<_> = rows.into_iter().map(|row| (row.did, row.labels)).collect();
+        assert_eq!(found, [(did("b"), vec![label("spam")]), (did("c"), vec![])]);
     }
 
     #[test]

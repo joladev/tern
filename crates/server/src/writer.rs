@@ -4,7 +4,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use appview::ProfileView;
 use search::Actor;
-use store::{BackfillState, Store};
+use store::{BackfillState, LabelOrigin, Store};
 use tokio::sync::mpsc::{self, error::TryRecvError};
 use types::{Account, Did, Enrichment, Handle, Profile};
 
@@ -209,6 +209,8 @@ impl Writer {
         if account_changed {
             self.store.put_account(did, &account)?;
         }
+        self.store
+            .put_labels(did, LabelOrigin::Appview, &view.labels)?;
         self.apply_enrichment(did, &account, view.enrichment, account_changed)?;
         Ok(is_new)
     }
@@ -307,7 +309,7 @@ pub fn record_backfill(state: &BackfillState) {
 #[cfg(test)]
 mod tests {
     use store::{BackfillCounts, BackfillProgress};
-    use types::Profile;
+    use types::{Label, Profile};
 
     use super::*;
     use crate::score::Reach;
@@ -423,6 +425,7 @@ mod tests {
                 followers,
                 created_at: None,
             },
+            labels: Vec::new(),
         }
     }
 
@@ -607,6 +610,28 @@ mod tests {
         fixture.apply(vec![looked_up(vec![("ann", Some(ann))])]);
 
         assert_eq!(fixture.found("an"), ["ann.test", "anna.test"]);
+    }
+
+    #[test]
+    fn a_lookup_stores_the_accounts_labels() {
+        let mut fixture = fixture();
+        fixture.apply(vec![change(1, "a", Change::Handle(handle("a")))]);
+        let label = Label {
+            src: did("labeler"),
+            uri: "did:plc:a".to_owned(),
+            cid: None,
+            val: "spam".to_owned(),
+            cts: "2026-01-01T00:00:00Z".to_owned(),
+            exp: None,
+        };
+        let a = ProfileView {
+            labels: vec![label.clone()],
+            ..view("a", 0)
+        };
+
+        fixture.apply(vec![looked_up(vec![("a", Some(a))])]);
+
+        assert_eq!(fixture.store.labels(&did("a")).unwrap(), [label]);
     }
 
     #[test]

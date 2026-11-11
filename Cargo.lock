@@ -74,6 +74,7 @@ dependencies = [
  "jiff",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
  "types",
 ]

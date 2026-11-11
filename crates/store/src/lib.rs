@@ -6,10 +6,11 @@ use std::path::Path;
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, KvPair, PersistMode, Slice};
 use serde::{Deserialize, Serialize};
-use types::{Account, Did, Enrichment};
+use types::{Account, Did, Enrichment, Label};
 
 const BACKFILL_STATE: &str = "backfill";
 const ENRICHMENT: &str = "counts";
+const LABELS: &str = "labels";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -46,6 +47,18 @@ pub struct EnrichmentRow {
     pub fetched_at: i64,
 }
 
+pub enum LabelOrigin {
+    Appview,
+}
+
+impl LabelOrigin {
+    fn key(&self) -> &str {
+        match self {
+            LabelOrigin::Appview => "appview",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct BackfillCounts {
     pub listed: u64,
@@ -62,6 +75,7 @@ pub struct Store {
     database: Database,
     accounts: Keyspace,
     enrichment: Keyspace,
+    labels: Keyspace,
     meta: Keyspace,
 }
 
@@ -70,11 +84,13 @@ impl Store {
         let database = Database::builder(path).open()?;
         let accounts = database.keyspace("accounts", KeyspaceCreateOptions::default)?;
         let enrichment = database.keyspace(ENRICHMENT, KeyspaceCreateOptions::default)?;
+        let labels = database.keyspace(LABELS, KeyspaceCreateOptions::default)?;
         let meta = database.keyspace("meta", KeyspaceCreateOptions::default)?;
         let store = Store {
             database,
             accounts,
             enrichment,
+            labels,
             meta,
         };
         store.migrate()?;
@@ -102,7 +118,41 @@ impl Store {
         let mut batch = self.database.batch();
         batch.remove(&self.accounts, did.as_str());
         batch.remove(&self.enrichment, did.as_str());
+        for entry in self.labels.prefix(labels_prefix(did)) {
+            batch.remove(&self.labels, entry.key()?);
+        }
         Ok(batch.commit()?)
+    }
+
+    pub fn put_labels(
+        &self,
+        did: &Did,
+        origin: LabelOrigin,
+        labels: &[Label],
+    ) -> Result<(), Error> {
+        let key = labels_key(did, &origin);
+        if labels.is_empty() {
+            if self.labels.contains_key(&key)? {
+                self.labels.remove(key)?;
+            }
+            return Ok(());
+        }
+        let value = postcard::to_stdvec(labels)?;
+        Ok(self.labels.insert(key, value)?)
+    }
+
+    pub fn labels(&self, did: &Did) -> Result<Vec<Label>, Error> {
+        let mut labels = Vec::new();
+        for entry in self.labels.prefix(labels_prefix(did)) {
+            let (_, bytes) = entry.into_inner()?;
+            let from_origin: Vec<Label> = postcard::from_bytes(&bytes)?;
+            for label in from_origin {
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+        }
+        Ok(labels)
     }
 
     pub fn put_enrichment(
@@ -220,6 +270,18 @@ fn following(did: Option<&Did>) -> (Bound<&str>, Bound<&str>) {
     (start, Bound::Unbounded)
 }
 
+fn labels_prefix(did: &Did) -> Vec<u8> {
+    let mut prefix = did.as_str().as_bytes().to_vec();
+    prefix.push(0);
+    prefix
+}
+
+fn labels_key(did: &Did, origin: &LabelOrigin) -> Vec<u8> {
+    let mut key = labels_prefix(did);
+    key.extend_from_slice(origin.key().as_bytes());
+    key
+}
+
 fn did_from_bytes(bytes: &[u8]) -> Result<Did, Error> {
     let did = String::from_utf8_lossy(bytes).into_owned();
     Did::try_from(did).map_err(Error::BadDid)
@@ -271,11 +333,54 @@ mod tests {
         };
         store.put_account(&alice, &account("alice.test")).unwrap();
         store.put_enrichment(&alice, enrichment, 10).unwrap();
+        store
+            .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
+            .unwrap();
 
         store.delete_account(&alice).unwrap();
 
         assert_eq!(store.account(&alice).unwrap(), None);
         assert_eq!(store.enrichment(&alice).unwrap(), Enrichment::default());
+        assert!(store.labels(&alice).unwrap().is_empty());
+    }
+
+    fn label(val: &str) -> Label {
+        Label {
+            src: did("labeler"),
+            uri: "did:plc:alice".to_owned(),
+            cid: None,
+            val: val.to_owned(),
+            cts: "2026-01-01T00:00:00Z".to_owned(),
+            exp: None,
+        }
+    }
+
+    #[test]
+    fn putting_labels_replaces_them_and_an_empty_list_clears_them() {
+        let (_dir, store) = open();
+        let alice = did("alice");
+
+        store
+            .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
+            .unwrap();
+        store
+            .put_labels(&alice, LabelOrigin::Appview, &[label("porn")])
+            .unwrap();
+        assert_eq!(store.labels(&alice).unwrap(), [label("porn")]);
+
+        store.put_labels(&alice, LabelOrigin::Appview, &[]).unwrap();
+        assert!(store.labels(&alice).unwrap().is_empty());
+    }
+
+    #[test]
+    fn labels_belong_to_one_account_only() {
+        let (_dir, store) = open();
+        store
+            .put_labels(&did("alice"), LabelOrigin::Appview, &[label("spam")])
+            .unwrap();
+
+        assert!(store.labels(&did("ali")).unwrap().is_empty());
+        assert!(store.labels(&did("alice2")).unwrap().is_empty());
     }
 
     #[test]

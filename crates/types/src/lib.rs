@@ -119,6 +119,16 @@ pub fn display_name(name: Option<String>) -> Option<String> {
     Some(name)
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Label {
+    pub src: Did,
+    pub uri: String,
+    pub cid: Option<String>,
+    pub val: String,
+    pub cts: String,
+    pub exp: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Enrichment {
     pub followers: u64,

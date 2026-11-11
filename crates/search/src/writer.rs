@@ -6,10 +6,11 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use tantivy::directory::MmapDirectory;
+use tantivy::schema::Field;
 use tantivy::tokenizer::{PreTokenizedString, Token};
 use tantivy::{
     Index, IndexBuilder, IndexReader, IndexSettings, IndexSortByField, IndexWriter, Order,
-    ReloadPolicy, TantivyDocument, Term,
+    ReloadPolicy, TantivyDocument, TantivyError, Term,
 };
 use types::Did;
 
@@ -181,13 +182,19 @@ struct Side {
     writer: IndexWriter,
     reader: IndexReader,
     format: u32,
+    num_fields: usize,
 }
 
 impl Side {
     fn open(path: &Path) -> Result<(Side, Payload), Error> {
         let index = open_index(path)?;
         let payload = Payload::read(&index)?;
-        let side = Side::from_index(&index, payload.format)?;
+        let format = if index.schema() == schema::build().0 {
+            payload.format
+        } else {
+            0
+        };
+        let side = Side::from_index(&index, format)?;
         Ok((side, payload))
     }
 
@@ -201,13 +208,26 @@ impl Side {
             writer,
             reader,
             format,
+            num_fields: index.schema().num_fields(),
         })
     }
 
     fn replace(&self, did: Term, document: TantivyDocument) -> Result<(), Error> {
         self.writer.delete_term(did);
-        self.writer.add_document(document)?;
+        self.writer.add_document(self.known_fields(document))?;
         Ok(())
+    }
+
+    fn known_fields(&self, document: TantivyDocument) -> TantivyDocument {
+        let known = |field: Field| (field.field_id() as usize) < self.num_fields;
+        if document.field_values().all(|(field, _)| known(field)) {
+            return document;
+        }
+        let mut known_only = TantivyDocument::new();
+        for (field, value) in document.field_values().filter(|(field, _)| known(*field)) {
+            known_only.add_field_value(field, value);
+        }
+        known_only
     }
 
     fn commit(&mut self, cursor: Option<u64>) -> Result<(), Error> {
@@ -224,7 +244,11 @@ impl Side {
 
 fn open_index(path: &Path) -> Result<Index, Error> {
     fs::create_dir_all(path).map_err(Error::CreateDirectory)?;
-    Ok(index_builder().open_or_create(MmapDirectory::open(path)?)?)
+    let directory = MmapDirectory::open(path)?;
+    if Index::exists(&directory).map_err(TantivyError::from)? {
+        return Ok(Index::open(directory)?);
+    }
+    Ok(index_builder().open_or_create(directory)?)
 }
 
 fn memory_index() -> Result<Index, Error> {
@@ -332,5 +356,72 @@ fn pre_tokenized(terms: Vec<String>) -> PreTokenizedString {
     PreTokenizedString {
         text: String::new(),
         tokens,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tantivy::schema::Schema;
+    use types::{Handle, Label};
+
+    use super::*;
+
+    fn actor(labels: Vec<Label>) -> Actor {
+        Actor {
+            did: Did::try_from("did:plc:alice".to_owned()).unwrap(),
+            handle: Handle::try_from("alice.test".to_owned()).unwrap(),
+            display_name: None,
+            avatar_cid: None,
+            labels,
+        }
+    }
+
+    fn write_older_index(path: &Path) {
+        let (current, _) = schema::build();
+        let mut older = Schema::builder();
+        for (_, entry) in current
+            .fields()
+            .filter(|(_, entry)| entry.name() != "labels")
+        {
+            older.add_field(entry.clone());
+        }
+        fs::create_dir_all(path).unwrap();
+        let index = index_builder()
+            .schema(older.build())
+            .create_in_dir(path)
+            .unwrap();
+        let (writer, _, _) = Writer::open_in_memory().unwrap();
+        let mut side = Side::from_index(&index, FORMAT).unwrap();
+        let did = writer.did_term(&actor(Vec::new()).did);
+        side.replace(did, writer.document(&actor(Vec::new()), 1))
+            .unwrap();
+        side.commit(None).unwrap();
+    }
+
+    #[test]
+    fn an_index_with_an_older_schema_keeps_serving_through_a_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        write_older_index(&path);
+
+        let (reader, mut writer) = crate::open(&path).unwrap();
+        assert!(writer.needs_rebuild());
+        assert_eq!(reader.search("alice", 10).unwrap().len(), 1);
+
+        let label = Label {
+            src: Did::try_from("did:plc:labeler".to_owned()).unwrap(),
+            uri: "did:plc:alice".to_owned(),
+            cid: None,
+            val: "spam".to_owned(),
+            cts: "2026-01-01T00:00:00Z".to_owned(),
+            exp: None,
+        };
+        writer.start_rebuild().unwrap();
+        writer.upsert(&actor(vec![label.clone()]), 1).unwrap();
+        writer.commit().unwrap();
+        writer.finish_rebuild().unwrap();
+
+        assert!(!writer.needs_rebuild());
+        assert_eq!(reader.search("alice", 10).unwrap()[0].labels, [label]);
     }
 }

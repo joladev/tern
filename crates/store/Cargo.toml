@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 fjall.workspace = true
+jiff.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true

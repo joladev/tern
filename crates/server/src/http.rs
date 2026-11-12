@@ -11,7 +11,7 @@ use jiff::Timestamp;
 use search::{Actor, Reader};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
-use types::{Did, Handle, Label};
+use types::{Did, Handle, Label, Verification, VerificationState};
 
 use crate::telemetry::Exporter;
 
@@ -69,6 +69,10 @@ struct ActorView {
     #[serde(skip_serializing_if = "Option::is_none")]
     avatar: Option<String>,
     labels: Vec<LabelView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<VerificationStateView>,
 }
 
 impl ActorView {
@@ -88,6 +92,8 @@ impl ActorView {
             display_name: actor.display_name,
             avatar,
             labels,
+            created_at: actor.created_at,
+            verification: actor.verification.map(VerificationStateView::from),
         }
     }
 }
@@ -117,12 +123,58 @@ impl From<Label> for LabelView {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationStateView {
+    verifications: Vec<VerificationView>,
+    verified_status: String,
+    trusted_verifier_status: String,
+}
+
+impl From<VerificationState> for VerificationStateView {
+    fn from(state: VerificationState) -> VerificationStateView {
+        VerificationStateView {
+            verifications: state
+                .verifications
+                .into_iter()
+                .map(VerificationView::from)
+                .collect(),
+            verified_status: state.verified_status,
+            trusted_verifier_status: state.trusted_verifier_status,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationView {
+    issuer: Did,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer_handle: Option<String>,
+    uri: String,
+    is_valid: bool,
+    created_at: String,
+}
+
+impl From<Verification> for VerificationView {
+    fn from(verification: Verification) -> VerificationView {
+        VerificationView {
+            issuer: verification.issuer,
+            issuer_display_name: verification.issuer_display_name,
+            issuer_handle: verification.issuer_handle,
+            uri: verification.uri,
+            is_valid: verification.is_valid,
+            created_at: verification.created_at,
+        }
+    }
+}
+
 fn has_expired(label: &Label, now: Timestamp) -> bool {
-    label
-        .exp
-        .as_deref()
-        .and_then(|exp| exp.parse::<Timestamp>().ok())
-        .is_some_and(|exp| exp <= now)
+    label.exp.as_deref().is_some_and(|exp| {
+        types::parse_datetime(exp).expect("label times are checked when they are read") <= now
+    })
 }
 
 async fn typeahead(
@@ -233,6 +285,8 @@ mod tests {
             display_name: None,
             avatar_cid: None,
             labels: vec![label(Some("2026-02-01T00:00:00Z")), label(None)],
+            created_at: None,
+            verification: None,
         };
         let now: Timestamp = "2026-03-01T00:00:00Z".parse().unwrap();
 

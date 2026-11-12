@@ -207,7 +207,11 @@ impl Writer {
         if updates_profile {
             account.profile = view.profile;
         }
-        let account_changed = is_new || updates_handle || updates_profile;
+        let updates_verification = account.verification != view.verification;
+        if updates_verification {
+            account.verification = view.verification;
+        }
+        let account_changed = is_new || updates_handle || updates_profile || updates_verification;
         if account_changed {
             self.store.put_account(did, &account)?;
         }
@@ -228,10 +232,13 @@ impl Writer {
     ) -> anyhow::Result<()> {
         let now = now();
         let previous = self.store.enrichment_row(did)?;
-        self.store.put_enrichment(did, enrichment, now)?;
+        self.store.put_enrichment(did, &enrichment, now)?;
+        let created_at_changed = previous
+            .as_ref()
+            .is_none_or(|row| row.enrichment.created_at != enrichment.created_at);
         let previous_score = previous.map(|row| self.scorer.score(&row.enrichment, row.fetched_at));
         let score_changed = previous_score != Some(self.scorer.score(&enrichment, now));
-        if document_changed || score_changed {
+        if document_changed || created_at_changed || score_changed {
             self.reindex(did, account, &enrichment, now)?;
         }
         Ok(())
@@ -283,6 +290,8 @@ impl Writer {
             display_name: account.profile.display_name.clone(),
             avatar_cid: account.profile.avatar_cid.clone(),
             labels,
+            created_at: enrichment.created_at.clone(),
+            verification: account.current_verification().cloned(),
         };
         Some((actor, self.scorer.score(enrichment, now)))
     }
@@ -322,7 +331,7 @@ pub fn record_backfill(state: &BackfillState) {
 #[cfg(test)]
 mod tests {
     use store::{BackfillCounts, BackfillProgress};
-    use types::Profile;
+    use types::{AppviewVerification, Profile, VerificationState};
 
     use super::*;
     use crate::score::Reach;
@@ -439,6 +448,7 @@ mod tests {
                 created_at: None,
             },
             labels: Vec::new(),
+            verification: None,
         }
     }
 
@@ -598,7 +608,7 @@ mod tests {
         let created = now() - 400 * 86_400;
         let enrichment = Enrichment {
             followers: 0,
-            created_at: Some(created),
+            created_at: Some(jiff::Timestamp::from_second(created).unwrap().to_string()),
         };
         fixture.apply(vec![change(1, "ann", Change::Handle(handle("ann")))]);
         let indexed = |name: &str| Actor {
@@ -607,10 +617,12 @@ mod tests {
             display_name: None,
             avatar_cid: None,
             labels: Vec::new(),
+            created_at: None,
+            verification: None,
         };
         fixture
             .store
-            .put_enrichment(&did("ann"), enrichment, created)
+            .put_enrichment(&did("ann"), &enrichment, created)
             .unwrap();
         fixture.writer.index.upsert(&indexed("ann"), 0).unwrap();
         fixture.writer.index.upsert(&indexed("anna"), 50).unwrap();
@@ -651,6 +663,32 @@ mod tests {
         );
         let found = fixture.reader.search("a.test", 1).unwrap();
         assert_eq!(found[0].labels, [label]);
+    }
+
+    #[test]
+    fn a_verified_lookup_makes_a_filtered_handle_searchable_with_its_verification() {
+        let mut fixture = fixture();
+        fixture.apply(vec![change(1, "coons", Change::Handle(handle("coons")))]);
+        assert!(fixture.found("coons").is_empty());
+        let state = VerificationState {
+            verifications: Vec::new(),
+            verified_status: "valid".to_owned(),
+            trusted_verifier_status: "none".to_owned(),
+        };
+        let coons = ProfileView {
+            verification: Some(AppviewVerification {
+                handle: handle("coons"),
+                display_name: None,
+                state: state.clone(),
+            }),
+            ..view("coons", 0)
+        };
+
+        fixture.apply(vec![looked_up(vec![("coons", Some(coons))])]);
+
+        let found = fixture.reader.search("coons", 1).unwrap();
+        assert_eq!(found[0].handle.as_str(), "coons.test");
+        assert_eq!(found[0].verification, Some(state));
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub struct Account {
     pub handle: Option<Handle>,
     pub profile: Profile,
     pub active: bool,
+    pub verification: Option<AppviewVerification>,
 }
 
 impl Default for Account {
@@ -95,16 +96,61 @@ impl Default for Account {
             handle: None,
             profile: Profile::default(),
             active: true,
+            verification: None,
         }
     }
 }
 
 impl Account {
     pub fn searchable_handle(&self) -> Option<&Handle> {
-        self.handle
-            .as_ref()
-            .filter(|handle| self.active && !slurs::contains_slur(handle.as_str()))
+        self.handle.as_ref().filter(|handle| {
+            self.active && (self.is_verified() || !slurs::contains_slur(handle.as_str()))
+        })
     }
+
+    pub fn current_verification(&self) -> Option<&VerificationState> {
+        let verification = self.verification.as_ref()?;
+        let unchanged = verification.handle == self.handle
+            && verification.display_name == self.profile.display_name;
+        unchanged.then_some(&verification.state)
+    }
+
+    fn is_verified(&self) -> bool {
+        self.current_verification()
+            .is_some_and(VerificationState::is_verified)
+    }
+}
+
+/// The AppView judges a verification against the account's handle and display
+/// name, so its verdict only holds while both are unchanged.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AppviewVerification {
+    pub handle: Option<Handle>,
+    pub display_name: Option<String>,
+    pub state: VerificationState,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VerificationState {
+    pub verifications: Vec<Verification>,
+    pub verified_status: String,
+    pub trusted_verifier_status: String,
+}
+
+impl VerificationState {
+    pub fn is_verified(&self) -> bool {
+        self.verified_status == "valid"
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Verification {
+    pub issuer: Did,
+    pub issuer_display_name: Option<String>,
+    pub issuer_handle: Option<String>,
+    pub uri: String,
+    pub is_valid: bool,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -129,10 +175,27 @@ pub struct Label {
     pub exp: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+impl Label {
+    pub fn has_valid_times(&self) -> bool {
+        parse_datetime(&self.cts).is_some()
+            && self
+                .exp
+                .as_deref()
+                .is_none_or(|exp| parse_datetime(exp).is_some())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Enrichment {
     pub followers: u64,
-    pub created_at: Option<i64>,
+    pub created_at: Option<String>,
+}
+
+/// Datetimes from other services are kept as the text they sent, so they pass
+/// through unchanged. They are checked with this when they are read, and parsed
+/// again only where they are used as times.
+pub fn parse_datetime(value: &str) -> Option<jiff::Timestamp> {
+    value.parse().ok()
 }
 
 #[cfg(test)]
@@ -163,6 +226,30 @@ mod tests {
             handle: Some(Handle::try_from("coon.example".to_owned()).unwrap()),
             ..Account::default()
         };
+        assert!(account.searchable_handle().is_none());
+    }
+
+    #[test]
+    fn a_verified_account_is_searchable_until_its_identity_changes() {
+        let handle = Handle::try_from("coons.senate.gov".to_owned()).unwrap();
+        let verification = AppviewVerification {
+            handle: Some(handle.clone()),
+            display_name: None,
+            state: VerificationState {
+                verifications: Vec::new(),
+                verified_status: "valid".to_owned(),
+                trusted_verifier_status: "none".to_owned(),
+            },
+        };
+        let mut account = Account {
+            handle: Some(handle),
+            verification: Some(verification),
+            ..Account::default()
+        };
+        assert!(account.searchable_handle().is_some());
+
+        account.profile.display_name = Some("Someone Else".to_owned());
+        assert!(account.current_verification().is_none());
         assert!(account.searchable_handle().is_none());
     }
 

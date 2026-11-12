@@ -178,6 +178,14 @@ impl Writer {
             let labels = serde_json::to_string(&actor.labels).expect("labels always serialize");
             document.add_text(fields.labels, labels);
         }
+        if let Some(created_at) = &actor.created_at {
+            document.add_text(fields.created_at, created_at);
+        }
+        if let Some(verification) = &actor.verification {
+            let verification =
+                serde_json::to_string(verification).expect("verifications always serialize");
+            document.add_text(fields.verification, verification);
+        }
         document.add_u64(fields.score, score);
 
         let terms = terms::account_terms(actor.handle.as_str(), actor.display_name.as_deref());
@@ -395,6 +403,8 @@ mod tests {
             display_name: None,
             avatar_cid: None,
             labels,
+            created_at: None,
+            verification: None,
         }
     }
 

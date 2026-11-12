@@ -13,6 +13,8 @@ pub struct Fields {
     pub score: Field,
     pub terms: Field,
     pub labels: Field,
+    pub created_at: Field,
+    pub verification: Field,
 }
 
 pub fn build() -> (Schema, Fields) {
@@ -33,6 +35,8 @@ pub fn build() -> (Schema, Fields) {
     let score = builder.add_u64_field(SCORE_FIELD, FAST);
     let terms = builder.add_text_field("terms", terms_options);
     let labels = builder.add_text_field("labels", STORED);
+    let created_at = builder.add_text_field("created_at", STORED);
+    let verification = builder.add_text_field("verification", STORED);
 
     let fields = Fields {
         did,
@@ -42,6 +46,8 @@ pub fn build() -> (Schema, Fields) {
         score,
         terms,
         labels,
+        created_at,
+        verification,
     };
     (builder.build(), fields)
 }

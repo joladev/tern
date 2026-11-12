@@ -155,11 +155,11 @@ impl Store {
     pub fn put_enrichment(
         &self,
         did: &Did,
-        enrichment: Enrichment,
+        enrichment: &Enrichment,
         fetched_at: i64,
     ) -> Result<(), Error> {
         let row = EnrichmentRow {
-            enrichment,
+            enrichment: enrichment.clone(),
             fetched_at,
         };
         let value = postcard::to_stdvec(&row)?;
@@ -374,7 +374,7 @@ mod tests {
             created_at: None,
         };
         store.put_account(&alice, &account("alice.test")).unwrap();
-        store.put_enrichment(&alice, enrichment, 10).unwrap();
+        store.put_enrichment(&alice, &enrichment, 10).unwrap();
         store
             .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
             .unwrap();
@@ -463,7 +463,7 @@ mod tests {
         for name in ["c", "a", "b"] {
             store.put_account(&did(name), &account("x.test")).unwrap();
         }
-        store.put_enrichment(&did("a"), enrichment, 10).unwrap();
+        store.put_enrichment(&did("a"), &enrichment, 10).unwrap();
 
         let dids =
             |rows: Vec<StoredAccount>| rows.into_iter().map(|row| row.did).collect::<Vec<_>>();
@@ -484,9 +484,9 @@ mod tests {
             followers,
             created_at: None,
         };
-        store.put_enrichment(&did("a"), enrichment(1), 10).unwrap();
-        store.put_enrichment(&did("b"), enrichment(2), 10).unwrap();
-        store.put_enrichment(&did("c"), enrichment(3), 10).unwrap();
+        store.put_enrichment(&did("a"), &enrichment(1), 10).unwrap();
+        store.put_enrichment(&did("b"), &enrichment(2), 10).unwrap();
+        store.put_enrichment(&did("c"), &enrichment(3), 10).unwrap();
 
         let rows = store.accounts_after(None, 10).unwrap();
 
@@ -504,10 +504,10 @@ mod tests {
             store.put_account(&did(name), &account("x.test")).unwrap();
         }
         store
-            .put_enrichment(&did("a"), Enrichment::default(), 10)
+            .put_enrichment(&did("a"), &Enrichment::default(), 10)
             .unwrap();
         store
-            .put_enrichment(&did("b"), Enrichment::default(), 50)
+            .put_enrichment(&did("b"), &Enrichment::default(), 50)
             .unwrap();
 
         let first = store.scan_stale(None, 20, 3).unwrap();

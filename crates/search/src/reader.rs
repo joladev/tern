@@ -210,6 +210,10 @@ impl Reader {
             }
             None => Vec::new(),
         };
+        let verification = text(self.fields.verification)
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| Error::BadDocument("verification"))?;
 
         Ok(Actor {
             did,
@@ -217,6 +221,8 @@ impl Reader {
             display_name: text(self.fields.display_name).map(str::to_owned),
             avatar_cid: text(self.fields.avatar_cid).map(str::to_owned),
             labels,
+            created_at: text(self.fields.created_at).map(str::to_owned),
+            verification,
         })
     }
 }

@@ -1,6 +1,8 @@
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
-use types::{Did, Enrichment, Handle, Label, Profile};
+use types::{
+    AppviewVerification, Did, Enrichment, Handle, Label, Profile, Verification, VerificationState,
+};
 
 const GET_PROFILES_PATH: &str = "/xrpc/app.bsky.actor.getProfiles";
 
@@ -29,6 +31,7 @@ pub struct ProfileView {
     pub profile: Profile,
     pub enrichment: Enrichment,
     pub labels: Vec<Label>,
+    pub verification: Option<AppviewVerification>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +51,54 @@ struct RawProfile {
     followers_count: i64,
     #[serde(default)]
     labels: Vec<RawLabel>,
+    verification: Option<RawVerificationState>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawVerificationState {
+    verifications: Vec<RawVerification>,
+    verified_status: String,
+    trusted_verifier_status: String,
+}
+
+impl RawVerificationState {
+    fn into_state(self) -> VerificationState {
+        VerificationState {
+            verifications: self
+                .verifications
+                .into_iter()
+                .filter_map(RawVerification::into_verification)
+                .collect(),
+            verified_status: self.verified_status,
+            trusted_verifier_status: self.trusted_verifier_status,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawVerification {
+    issuer: String,
+    issuer_display_name: Option<String>,
+    issuer_handle: Option<String>,
+    uri: String,
+    is_valid: bool,
+    created_at: String,
+}
+
+impl RawVerification {
+    fn into_verification(self) -> Option<Verification> {
+        types::parse_datetime(&self.created_at)?;
+        Some(Verification {
+            issuer: Did::try_from(self.issuer).ok()?,
+            issuer_display_name: self.issuer_display_name,
+            issuer_handle: self.issuer_handle,
+            uri: self.uri,
+            is_valid: self.is_valid,
+            created_at: self.created_at,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -62,14 +113,15 @@ struct RawLabel {
 
 impl RawLabel {
     fn into_label(self) -> Option<Label> {
-        Some(Label {
+        let label = Label {
             src: Did::try_from(self.src).ok()?,
             uri: self.uri,
             cid: self.cid,
             val: self.val,
             cts: self.cts,
             exp: self.exp,
-        })
+        };
+        label.has_valid_times().then_some(label)
     }
 }
 
@@ -83,8 +135,7 @@ impl From<RawProfile> for ProfileView {
             followers: count(raw.followers_count),
             created_at: raw
                 .created_at
-                .and_then(|time| time.parse::<jiff::Timestamp>().ok())
-                .map(|time| time.as_second()),
+                .filter(|time| types::parse_datetime(time).is_some()),
         };
         let handle = Handle::try_from(raw.handle).ok();
         let labels = raw
@@ -92,12 +143,18 @@ impl From<RawProfile> for ProfileView {
             .into_iter()
             .filter_map(RawLabel::into_label)
             .collect();
+        let verification = raw.verification.map(|state| AppviewVerification {
+            handle: handle.clone(),
+            display_name: profile.display_name.clone(),
+            state: state.into_state(),
+        });
         ProfileView {
             did: raw.did,
             handle,
             profile,
             enrichment,
             labels,
+            verification,
         }
     }
 }
@@ -143,6 +200,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn labels_with_invalid_times_are_left_out() {
+        let profile = r#"{
+            "did": "did:plc:x",
+            "handle": "x.test",
+            "labels": [{
+                "src": "did:plc:ar7c4by46qjdydhdevvrndac",
+                "uri": "did:plc:x",
+                "val": "spam",
+                "cts": "2026-03-09T14:53:09.930Z",
+                "exp": "next tuesday"
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(profile).unwrap();
+
+        assert!(ProfileView::from(raw).labels.is_empty());
+    }
+
+    #[test]
     fn reads_labels_from_a_profile() {
         let profile = r#"{
             "did": "did:plc:x",
@@ -169,6 +244,48 @@ mod tests {
             exp: None,
         };
         assert_eq!(view.labels, [label]);
+    }
+
+    #[test]
+    fn reads_the_verification_for_the_handle_and_name_it_judged() {
+        let profile = r#"{
+            "did": "did:plc:x",
+            "handle": "x.test",
+            "displayName": "X",
+            "verification": {
+                "verifications": [{
+                    "issuer": "did:plc:z72i7hdynmk6r22z27h6tvur",
+                    "issuerHandle": "bsky.app",
+                    "uri": "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.graph.verification/3l",
+                    "isValid": true,
+                    "createdAt": "2025-07-20T22:36:31.691Z"
+                }],
+                "verifiedStatus": "valid",
+                "trustedVerifierStatus": "none"
+            }
+        }"#;
+        let raw: RawProfile = serde_json::from_str(profile).unwrap();
+
+        let view = ProfileView::from(raw);
+
+        let verification = Verification {
+            issuer: Did::try_from("did:plc:z72i7hdynmk6r22z27h6tvur".to_owned()).unwrap(),
+            issuer_display_name: None,
+            issuer_handle: Some("bsky.app".to_owned()),
+            uri: "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.graph.verification/3l".to_owned(),
+            is_valid: true,
+            created_at: "2025-07-20T22:36:31.691Z".to_owned(),
+        };
+        let expected = AppviewVerification {
+            handle: Handle::try_from("x.test".to_owned()).ok(),
+            display_name: Some("X".to_owned()),
+            state: VerificationState {
+                verifications: vec![verification],
+                verified_status: "valid".to_owned(),
+                trusted_verifier_status: "none".to_owned(),
+            },
+        };
+        assert_eq!(view.verification, Some(expected));
     }
 
     #[test]

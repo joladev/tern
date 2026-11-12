@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use tantivy::directory::MmapDirectory;
+use tantivy::merge_policy::LogMergePolicy;
 use tantivy::schema::Field;
 use tantivy::tokenizer::{PreTokenizedString, Token};
 use tantivy::{
@@ -20,6 +21,7 @@ use crate::{Actor, Error, FORMAT, terms};
 
 const WRITER_THREADS: usize = 1;
 const WRITER_MEMORY_BYTES: usize = 64_000_000;
+const MAX_DELETED_SHARE: f32 = 0.2;
 
 pub struct Writer {
     slots: Option<Slots>,
@@ -73,6 +75,18 @@ impl Writer {
 
     pub fn num_docs(&self) -> u64 {
         self.live.reader.searcher().num_docs()
+    }
+
+    pub fn segments(&self) -> usize {
+        self.live.reader.searcher().segment_readers().len()
+    }
+
+    pub fn deleted_docs(&self) -> u64 {
+        let searcher = self.live.reader.searcher();
+        let segments = searcher.segment_readers().iter();
+        segments
+            .map(|segment| u64::from(segment.num_deleted_docs()))
+            .sum()
     }
 
     pub fn needs_rebuild(&self) -> bool {
@@ -200,6 +214,7 @@ impl Side {
 
     fn from_index(index: &Index, format: u32) -> Result<Side, Error> {
         let writer = index.writer_with_num_threads(WRITER_THREADS, WRITER_MEMORY_BYTES)?;
+        writer.set_merge_policy(Box::new(merge_policy()));
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -240,6 +255,13 @@ impl Side {
         commit.commit()?;
         Ok(())
     }
+}
+
+fn merge_policy() -> LogMergePolicy {
+    let mut policy = LogMergePolicy::default();
+    policy.set_max_docs_before_merge(usize::MAX);
+    policy.set_del_docs_ratio_before_merge(MAX_DELETED_SHARE);
+    policy
 }
 
 fn open_index(path: &Path) -> Result<Index, Error> {

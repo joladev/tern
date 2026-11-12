@@ -136,7 +136,7 @@ impl Writer {
             .context("failed to switch to the rebuilt index")?;
         self.rebuild = None;
         metrics::gauge!("tern_index_rebuilding").set(0.0);
-        metrics::gauge!("tern_indexed_accounts").set(self.index.num_docs() as f64);
+        self.record_index();
         tracing::info!("index rebuild finished");
         Ok(())
     }
@@ -287,6 +287,12 @@ impl Writer {
         Some((actor, self.scorer.score(enrichment, now)))
     }
 
+    fn record_index(&self) {
+        metrics::gauge!("tern_indexed_accounts").set(self.index.num_docs() as f64);
+        metrics::gauge!("tern_index_segments").set(self.index.segments() as f64);
+        metrics::gauge!("tern_index_deleted_docs").set(self.index.deleted_docs() as f64);
+    }
+
     fn commit(&mut self) -> anyhow::Result<()> {
         if !self.has_changes {
             return Ok(());
@@ -296,7 +302,7 @@ impl Writer {
         self.index.commit().context("failed to commit the index")?;
         self.has_changes = false;
         metrics::histogram!("tern_commit_seconds").record(start.elapsed());
-        metrics::gauge!("tern_indexed_accounts").set(self.index.num_docs() as f64);
+        self.record_index();
         tracing::debug!(cursor = ?self.index.cursor(), "committed");
         Ok(())
     }

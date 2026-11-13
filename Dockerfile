@@ -1,4 +1,4 @@
-FROM rust:1.99.1-slim-trixie AS build
+FROM rust:1.100.0-slim-trixie AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake g++ make perl
 WORKDIR /src
 COPY . .

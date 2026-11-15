@@ -26,4 +26,4 @@ steps:
   - name: unit tests
     command: just test
   - name: integration tests
-    command: just test-integration
+    command: just integration

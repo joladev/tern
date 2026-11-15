@@ -199,9 +199,10 @@ impl Client {
     }
 
     pub async fn facts(&self, dids: &[Did], concurrency: usize) -> Fetched {
-        let calls = dids
+        let calls: Vec<_> = dids
             .chunks(MAX_ACCOUNTS_PER_CALL)
-            .map(|dids| async move { (dids, self.profiles(dids).await) });
+            .map(|dids| async move { (dids, self.profiles(dids).await) })
+            .collect();
         let mut calls = stream::iter(calls).buffer_unordered(concurrency);
         let mut fetched = Fetched::default();
         while let Some((dids, result)) = calls.next().await {

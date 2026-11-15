@@ -1,10 +1,9 @@
-mod backfill;
 mod http;
-mod ingest;
-mod lookup;
 mod refresh;
 mod score;
+mod sources;
 mod telemetry;
+mod triggers;
 mod writer;
 
 use std::future::Future;
@@ -22,20 +21,20 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use backfill::Backfill;
-use ingest::Ingest;
-use lookup::Lookups;
 use refresh::Refresh;
 use score::Reach;
+use sources::{Appview, SlingshotIdentity, SlingshotProfile, Source};
 use telemetry::Exporter;
-use writer::{Message, Writer, record_backfill};
+use triggers::backfill::Backfill;
+use triggers::jetstream::Jetstream;
+use triggers::stale::Stale;
+use writer::{Message, Writer};
 
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const WRITER_QUEUE_SIZE: usize = 1024;
 const JETSTREAM_QUEUE_SIZE: usize = 10_000;
-const LOOKUP_QUEUE_SIZE: usize = 64;
 const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -85,6 +84,13 @@ struct ServeArgs {
         default_value = "https://slingshot.cove.town"
     )]
     slingshot_url: String,
+    #[arg(
+        long,
+        env = "TERN_SLINGSHOT_CONCURRENCY",
+        default_value_t = 64,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    slingshot_concurrency: u64,
     #[arg(
         long,
         env = "TERN_USER_AGENT",
@@ -139,7 +145,7 @@ fn init_logging(format: LogFormat) {
 async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
     let store = open_store(data_dir)?;
     let (reader, index) = open_index(data_dir)?;
-    let cursor = index.cursor();
+    let cursor = store.jetstream_position()?.or(index.cursor());
     tracing::info!(?cursor, "starting");
 
     let exporter = Arc::new(Exporter::install()?);
@@ -156,20 +162,29 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
 
     let slingshot = slingshot::Client::new(http_client.clone(), args.slingshot_url);
     let appview = appview::Client::new(http_client.clone(), args.appview_url);
-
-    let (lookup_queue, lookups) = mpsc::channel(LOOKUP_QUEUE_SIZE);
-    let ingest = Ingest {
-        subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
-        resolver: slingshot,
+    let slingshot_concurrency = args.slingshot_concurrency as usize;
+    let sources: Vec<Box<dyn Source>> = vec![
+        Box::new(SlingshotIdentity {
+            client: slingshot.clone(),
+            concurrency: slingshot_concurrency,
+        }),
+        Box::new(SlingshotProfile {
+            client: slingshot,
+            concurrency: slingshot_concurrency,
+        }),
+        Box::new(Appview {
+            client: appview,
+            concurrency: args.appview_concurrency as usize,
+        }),
+    ];
+    let refresh = Refresh {
         store: Arc::clone(&store),
+        sources,
         writer: writer_queue.clone(),
-        lookups: lookup_queue.clone(),
     };
-    let consumer = Lookups {
-        appview,
-        queue: lookups,
-        writer: writer_queue.clone(),
-        concurrency: args.appview_concurrency as usize,
+    let jetstream = Jetstream {
+        subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
+        store: Arc::clone(&store),
     };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
@@ -191,26 +206,25 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
     let server = axum::serve(listener, http::router(reader)).with_graceful_shutdown(shutdown);
 
     let mut tasks = JoinSet::new();
-    spawn_until_cancelled(&mut tasks, &cancel, ingest.run());
-    let backfill_state = store
-        .backfill_state()
-        .context("failed to read the backfill state")?;
-    record_backfill(&backfill_state);
-    if args.backfill && !backfill_state.progress.finished {
+    spawn_until_cancelled(&mut tasks, &cancel, jetstream.run());
+    let backfill_finished = store
+        .backfill_position()
+        .context("failed to read the backfill position")?
+        .finished;
+    metrics::gauge!("tern_backfill_finished").set(f64::from(u8::from(backfill_finished)));
+    if args.backfill && !backfill_finished {
         let backfill = Backfill {
             hubble: hubble::Client::new(http_client, args.hubble_url),
             store: Arc::clone(&store),
-            queue: lookup_queue.clone(),
         };
         spawn_finite(&mut tasks, &cancel, backfill.run());
     }
-    let refresh = Refresh {
+    let stale = Stale {
         store: Arc::clone(&store),
-        queue: lookup_queue,
         stale_after: args.refresh_after,
     };
+    spawn_until_cancelled(&mut tasks, &cancel, stale.run());
     spawn_until_cancelled(&mut tasks, &cancel, refresh.run());
-    spawn_until_cancelled(&mut tasks, &cancel, consumer.run());
     spawn_until_cancelled(&mut tasks, &cancel, tick(writer_queue));
     spawn_until_cancelled(&mut tasks, &cancel, async move {
         server.await.context("the HTTP server failed")

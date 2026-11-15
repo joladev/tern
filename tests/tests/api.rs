@@ -145,7 +145,7 @@ fn metrics_are_exposed() {
     for name in [
         "tern_events_total",
         "tern_jetstream_lag_seconds",
-        "tern_handle_lookup_seconds_bucket",
+        "tern_source_fetch_seconds_bucket",
         "tern_commit_seconds_bucket",
         "tern_indexed_accounts",
         "tern_search_seconds_bucket",
@@ -171,10 +171,7 @@ fn backfill_finishes() {
     let harness = Harness::connect();
     harness.wait_for_metric("tern_backfill_finished", 1.0);
 
-    let metrics = harness.metrics();
-    for name in ["tern_backfill_listed", "tern_backfill_filled"] {
-        assert!(metrics.contains(name), "missing {name}");
-    }
+    assert!(harness.metrics().contains("tern_backfill_listed"));
 }
 
 #[test]

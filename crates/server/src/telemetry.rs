@@ -27,7 +27,7 @@ impl Exporter {
             )
             .and_then(|builder| {
                 builder.set_buckets_for_metric(
-                    Matcher::Full("tern_handle_lookup_seconds".to_owned()),
+                    Matcher::Full("tern_source_fetch_seconds".to_owned()),
                     LOOKUP_BUCKETS,
                 )
             })

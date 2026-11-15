@@ -2,13 +2,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use appview::ProfileView;
 use search::Actor;
-use store::{BackfillState, LabelOrigin, Store};
+use store::{LabelOrigin, Queued, Store};
 use tokio::sync::mpsc::{self, error::TryRecvError};
-use types::{Account, Did, Enrichment, Handle, Label, Profile};
+use types::{Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, Status};
 
-use crate::lookup::Source;
 use crate::score::Scorer;
 
 const REBUILD_CHUNK: usize = 1000;
@@ -16,23 +14,13 @@ const REBUILD_CHUNK: usize = 1000;
 const MESSAGES_PER_STEP: usize = 100;
 
 pub enum Message {
-    Change {
-        seq: u64,
-        did: Did,
-        change: Change,
-    },
-    LookedUp {
-        accounts: Vec<(Did, Option<ProfileView>)>,
-        source: Source,
-    },
+    Round(Round),
     Commit,
 }
 
-pub enum Change {
-    Handle(Option<Handle>),
-    Profile(Profile),
-    Status { active: bool },
-    Deleted,
+pub struct Round {
+    pub jobs: Vec<Queued>,
+    pub fetched: Vec<Fetched>,
 }
 
 pub struct Writer {
@@ -41,6 +29,7 @@ pub struct Writer {
     scorer: Box<dyn Scorer>,
     has_changes: bool,
     rebuild: Option<Rebuild>,
+    finished: Vec<Queued>,
 }
 
 struct Rebuild {
@@ -55,6 +44,7 @@ impl Writer {
             scorer,
             has_changes: false,
             rebuild: None,
+            finished: Vec::new(),
         }
     }
 
@@ -143,136 +133,93 @@ impl Writer {
 
     fn apply(&mut self, message: Message) -> anyhow::Result<()> {
         match message {
-            Message::Change { seq, did, change } => {
-                self.apply_change(&did, change)?;
-                self.index.set_cursor(seq);
-                self.has_changes = true;
-            }
-            Message::LookedUp { accounts, source } => {
-                let mut created = 0;
-                for (did, view) in accounts {
-                    if self.apply_lookup(&did, view, source.may_create())? {
-                        created += 1;
-                    }
-                }
-                self.save_backfill(source, created)?;
-                self.has_changes = true;
-            }
+            Message::Round(round) => self.apply_round(round)?,
             Message::Commit => self.commit()?,
         }
         Ok(())
     }
 
-    fn apply_change(&self, did: &Did, change: Change) -> anyhow::Result<()> {
-        let mut account = self.store.account(did)?.unwrap_or_default();
-        match change {
-            Change::Handle(handle) => account.handle = handle,
-            Change::Profile(profile) => account.profile = profile,
-            Change::Status { active } => account.active = active,
-            Change::Deleted => {
-                self.store.delete_account(did)?;
-                self.index.remove(did);
-                return Ok(());
-            }
+    fn apply_round(&mut self, round: Round) -> anyhow::Result<()> {
+        for mut queued in round.jobs {
+            let did = &queued.job.did;
+            let seen = std::mem::take(&mut queued.job.seen);
+            let fetched = round
+                .fetched
+                .iter()
+                .filter_map(|fetched| fetched.facts.get(did).cloned());
+            let facts = fetched.fold(seen, Facts::or);
+            self.apply_facts(did, facts)?;
+            self.finished.push(queued);
         }
-        self.store.put_account(did, &account)?;
-        let enrichment = self.store.enrichment(did)?;
-        self.reindex(did, &account, &enrichment, now())
-    }
-
-    fn apply_lookup(
-        &mut self,
-        did: &Did,
-        view: Option<ProfileView>,
-        may_create: bool,
-    ) -> anyhow::Result<bool> {
-        let stored = self.store.account(did)?;
-        let Some(view) = view else {
-            if let Some(account) = stored {
-                self.apply_enrichment(did, &account, Enrichment::default(), false)?;
-            }
-            return Ok(false);
-        };
-        if stored.is_none() && !may_create {
-            return Ok(false);
-        }
-
-        let is_new = stored.is_none();
-        let mut account = stored.unwrap_or_default();
-        let updates_handle = view.handle.is_some() && account.handle != view.handle;
-        let updates_profile = account.profile != view.profile;
-        if updates_handle {
-            account.handle = view.handle;
-        }
-        if updates_profile {
-            account.profile = view.profile;
-        }
-        let updates_verification = account.verification != view.verification;
-        if updates_verification {
-            account.verification = view.verification;
-        }
-        let account_changed = is_new || updates_handle || updates_profile || updates_verification;
-        if account_changed {
-            self.store.put_account(did, &account)?;
-        }
-        let labels_changed = self
-            .store
-            .put_labels(did, LabelOrigin::Appview, &view.labels)?;
-        let document_changed = account_changed || labels_changed;
-        self.apply_enrichment(did, &account, view.enrichment, document_changed)?;
-        Ok(is_new)
-    }
-
-    fn apply_enrichment(
-        &mut self,
-        did: &Did,
-        account: &Account,
-        enrichment: Enrichment,
-        document_changed: bool,
-    ) -> anyhow::Result<()> {
-        let now = now();
-        let previous = self.store.enrichment_row(did)?;
-        self.store.put_enrichment(did, &enrichment, now)?;
-        let created_at_changed = previous
-            .as_ref()
-            .is_none_or(|row| row.enrichment.created_at != enrichment.created_at);
-        let previous_score = previous.map(|row| self.scorer.score(&row.enrichment, row.fetched_at));
-        let score_changed = previous_score != Some(self.scorer.score(&enrichment, now));
-        if document_changed || created_at_changed || score_changed {
-            self.reindex(did, account, &enrichment, now)?;
-        }
+        self.has_changes = true;
         Ok(())
     }
 
-    fn save_backfill(&self, source: Source, created: u64) -> anyhow::Result<()> {
-        let Source::Backfill { progress, listed } = source else {
+    fn apply_facts(&self, did: &Did, facts: Facts) -> anyhow::Result<()> {
+        let before = self.document(did)?;
+        self.save(did, facts)?;
+        let after = self.document(did)?;
+        if before == after {
             return Ok(());
-        };
-        if progress.finished {
-            tracing::info!("backfill finished");
         }
-        let mut state = self.store.backfill_state()?;
-        state.progress = progress;
-        state.counts.listed += listed;
-        state.counts.filled += created;
-        self.store.put_backfill_state(&state)?;
-        record_backfill(&state);
-        Ok(())
-    }
-
-    fn reindex(
-        &self,
-        did: &Did,
-        account: &Account,
-        enrichment: &Enrichment,
-        now: i64,
-    ) -> anyhow::Result<()> {
-        let labels = self.store.labels(did)?;
-        match self.searchable(did, account, enrichment, labels, now) {
+        match after {
             Some((actor, score)) => self.index.upsert(&actor, score)?,
             None => self.index.remove(did),
         }
         Ok(())
+    }
+
+    fn save(&self, did: &Did, facts: Facts) -> anyhow::Result<()> {
+        if facts.status == Some(Status::Deleted) {
+            return Ok(self.store.blank_account(did)?);
+        }
+        let stored = self.store.account(did)?;
+        let mut account = stored.clone().unwrap_or_default();
+        if let Some(status) = facts.status {
+            account.active = status == Status::Active;
+        }
+        // Live jobs run before background jobs, so if an account is deleted
+        // just after it's scheduled for a weekly refresh, we would refresh
+        // a deleted/inactive account. The Bluesky AppView is also cached
+        // and can be behind, so it might return conflicting information.
+        // This check protects us from accidentally reviving inactive accounts.
+        if account.active {
+            match facts.handle {
+                Some(HandleFact::Resolved(handle)) => account.handle = Some(handle),
+                Some(HandleFact::Invalid) => account.handle = None,
+                None => {}
+            }
+            if let Some(profile) = facts.profile {
+                account.profile = profile;
+            }
+            if let Some(verification) = facts.verification {
+                account.verification = verification;
+            }
+            let enrichment = match facts.enrichment {
+                Some(enrichment) => enrichment,
+                None => self.store.enrichment(did)?,
+            };
+            self.store.put_enrichment(did, &enrichment, now())?;
+            if let Some(labels) = &facts.labels {
+                self.store.put_labels(did, LabelOrigin::Appview, labels)?;
+            }
+        }
+        if stored.as_ref() != Some(&account) {
+            self.store.put_account(did, &account)?;
+        }
+        Ok(())
+    }
+
+    fn document(&self, did: &Did) -> anyhow::Result<Option<(Actor, u64)>> {
+        let Some(account) = self.store.account(did)? else {
+            return Ok(None);
+        };
+        let (enrichment, fetched_at) = match self.store.enrichment_row(did)? {
+            Some(row) => (row.enrichment, row.fetched_at),
+            None => (Enrichment::default(), now()),
+        };
+        let labels = self.store.labels(did)?;
+        Ok(self.searchable(did, &account, &enrichment, labels, fetched_at))
     }
 
     fn searchable(
@@ -309,10 +256,11 @@ impl Writer {
         let start = Instant::now();
         self.store.persist().context("failed to flush the store")?;
         self.index.commit().context("failed to commit the index")?;
+        self.store.finish(&self.finished)?;
+        self.finished.clear();
         self.has_changes = false;
         metrics::histogram!("tern_commit_seconds").record(start.elapsed());
         self.record_index();
-        tracing::debug!(cursor = ?self.index.cursor(), "committed");
         Ok(())
     }
 }
@@ -321,17 +269,10 @@ fn now() -> i64 {
     jiff::Timestamp::now().as_second()
 }
 
-pub fn record_backfill(state: &BackfillState) {
-    let finished = f64::from(u8::from(state.progress.finished));
-    metrics::gauge!("tern_backfill_finished").set(finished);
-    metrics::gauge!("tern_backfill_listed").set(state.counts.listed as f64);
-    metrics::gauge!("tern_backfill_filled").set(state.counts.filled as f64);
-}
-
 #[cfg(test)]
 mod tests {
-    use store::{BackfillCounts, BackfillProgress};
-    use types::{AppviewVerification, Profile, VerificationState};
+    use store::Lane;
+    use types::{AppviewVerification, Handle, Job, Profile, VerificationState};
 
     use super::*;
     use crate::score::Reach;
@@ -360,24 +301,85 @@ mod tests {
         Did::try_from(format!("did:plc:{name}")).unwrap()
     }
 
-    fn handle(name: &str) -> Option<Handle> {
-        Some(Handle::try_from(format!("{name}.test")).unwrap())
+    fn handle(name: &str) -> Facts {
+        let handle = Handle::try_from(format!("{name}.test")).unwrap();
+        Facts {
+            handle: Some(HandleFact::Resolved(handle)),
+            ..Facts::default()
+        }
     }
 
-    fn change(seq: u64, name: &str, change: Change) -> Message {
-        Message::Change {
-            seq,
-            did: did(name),
-            change,
+    fn status(status: Status) -> Facts {
+        Facts {
+            status: Some(status),
+            ..Facts::default()
+        }
+    }
+
+    fn followers(followers: u64) -> Facts {
+        Facts {
+            enrichment: Some(Enrichment {
+                followers,
+                created_at: None,
+            }),
+            ..Facts::default()
+        }
+    }
+
+    fn named(name: &str) -> Facts {
+        Facts {
+            profile: Some(Profile {
+                display_name: Some(name.to_owned()),
+                avatar_cid: None,
+            }),
+            ..Facts::default()
+        }
+    }
+
+    fn answer(name: &str, facts: Facts) -> Fetched {
+        Fetched {
+            facts: [(did(name), facts)].into(),
+            failed: Vec::new(),
+        }
+    }
+
+    fn failure(name: &str) -> Fetched {
+        Fetched {
+            facts: [].into(),
+            failed: vec![did(name)],
         }
     }
 
     impl Fixture {
-        fn apply(&mut self, messages: Vec<Message>) {
-            for message in messages {
-                self.writer.apply(message).unwrap();
-            }
+        fn refresh(&mut self, name: &str, seen: Facts, fetched: Vec<Fetched>) {
+            let job = Job {
+                did: did(name),
+                seen,
+            };
+            self.store.enqueue(Lane::Live, vec![job], None).unwrap();
+            self.round(fetched);
+        }
+
+        fn round(&mut self, fetched: Vec<Fetched>) {
+            let round = Round {
+                jobs: self.store.next_jobs(10).unwrap(),
+                fetched,
+            };
+            self.writer.apply(Message::Round(round)).unwrap();
             self.writer.apply(Message::Commit).unwrap();
+        }
+
+        fn refreshed_at(&self, name: &str) -> i64 {
+            let row = self.store.enrichment_row(&did(name)).unwrap();
+            row.map_or(0, |row| row.fetched_at)
+        }
+
+        fn fetched(&mut self, name: &str, facts: Facts) {
+            self.refresh(name, Facts::default(), vec![answer(name, facts)]);
+        }
+
+        fn seen(&mut self, name: &str, facts: Facts) {
+            self.refresh(name, facts, Vec::new());
         }
 
         fn found(&self, query: &str) -> Vec<String> {
@@ -393,7 +395,7 @@ mod tests {
     fn an_account_with_a_handle_becomes_searchable() {
         let mut fixture = fixture();
 
-        fixture.apply(vec![change(1, "a", Change::Handle(handle("alice")))]);
+        fixture.fetched("a", handle("alice"));
 
         assert_eq!(fixture.found("ali"), ["alice.test"]);
     }
@@ -401,110 +403,110 @@ mod tests {
     #[test]
     fn an_account_without_a_handle_is_stored_but_not_searchable() {
         let mut fixture = fixture();
-        let profile = Profile {
-            display_name: Some("Alice".to_owned()),
-            ..Profile::default()
-        };
 
-        fixture.apply(vec![change(1, "a", Change::Profile(profile))]);
+        fixture.fetched("a", named("Alice"));
 
         assert!(fixture.store.account(&did("a")).unwrap().is_some());
         assert!(fixture.found("ali").is_empty());
     }
 
     #[test]
+    fn an_invalid_handle_clears_the_handle() {
+        let mut fixture = fixture();
+        fixture.fetched("a", handle("alice"));
+
+        let invalid = Facts {
+            handle: Some(HandleFact::Invalid),
+            ..Facts::default()
+        };
+        fixture.fetched("a", invalid);
+
+        assert!(fixture.found("ali").is_empty());
+    }
+
+    #[test]
+    fn what_the_trigger_saw_wins_over_what_was_fetched() {
+        let mut fixture = fixture();
+        let fetched = handle("alice").or(named("Old Name"));
+
+        fixture.refresh("a", named("New Name"), vec![answer("a", fetched)]);
+
+        let found = fixture.reader.search("ali", 1).unwrap();
+        assert_eq!(found[0].display_name.as_deref(), Some("New Name"));
+    }
+
+    #[test]
     fn deactivating_hides_an_account_and_reactivating_restores_it() {
         let mut fixture = fixture();
-        fixture.apply(vec![
-            change(1, "a", Change::Handle(handle("alice"))),
-            change(2, "a", Change::Status { active: false }),
-        ]);
+        fixture.fetched("a", handle("alice"));
+
+        fixture.seen("a", status(Status::Inactive));
         assert!(fixture.found("ali").is_empty());
 
-        fixture.apply(vec![change(3, "a", Change::Status { active: true })]);
-
+        fixture.seen("a", status(Status::Active));
         assert_eq!(fixture.found("ali"), ["alice.test"]);
     }
 
     #[test]
-    fn deleting_removes_the_account_everywhere() {
+    fn a_deleted_account_is_blanked_and_a_later_job_does_not_bring_it_back() {
         let mut fixture = fixture();
-        fixture.apply(vec![
-            change(1, "a", Change::Handle(handle("alice"))),
-            change(2, "a", Change::Deleted),
-        ]);
+        fixture.fetched("a", handle("alice"));
 
-        assert_eq!(fixture.store.account(&did("a")).unwrap(), None);
+        fixture.seen("a", status(Status::Deleted));
+        fixture.fetched("a", handle("alice"));
+
+        let account = fixture.store.account(&did("a")).unwrap().unwrap();
+        assert_eq!(account.handle, None);
         assert!(fixture.found("ali").is_empty());
     }
 
-    fn view(name: &str, followers: u64) -> ProfileView {
-        ProfileView {
-            did: did(name),
-            handle: handle(name),
-            profile: Profile::default(),
-            enrichment: Enrichment {
-                followers,
-                created_at: None,
-            },
-            labels: Vec::new(),
-            verification: None,
-        }
-    }
-
-    fn lookup(views: Vec<(&str, Option<ProfileView>)>, source: Source) -> Message {
-        let accounts = views
-            .into_iter()
-            .map(|(name, view)| (did(name), view))
-            .collect();
-        Message::LookedUp { accounts, source }
-    }
-
-    fn looked_up(views: Vec<(&str, Option<ProfileView>)>) -> Message {
-        lookup(views, Source::Refresh)
-    }
-
-    fn backfilled(views: Vec<(&str, Option<ProfileView>)>) -> Message {
-        let progress = BackfillProgress::default();
-        lookup(
-            views,
-            Source::Backfill {
-                progress,
-                listed: 0,
-            },
-        )
-    }
-
     #[test]
-    fn a_lookup_reorders_results() {
+    fn more_followers_rank_an_account_higher() {
         let mut fixture = fixture();
-        fixture.apply(vec![
-            change(1, "a", Change::Handle(handle("alice"))),
-            change(2, "b", Change::Handle(handle("alicia"))),
-        ]);
+        fixture.fetched("a", handle("alice"));
+        fixture.fetched("b", handle("alicia"));
 
-        fixture.apply(vec![looked_up(vec![("b", Some(view("alicia", 500)))])]);
+        fixture.fetched("b", followers(500));
 
         assert_eq!(fixture.found("ali"), ["alicia.test", "alice.test"]);
     }
 
     #[test]
-    fn replaying_the_same_events_gives_the_same_result() {
+    fn replaying_the_same_job_gives_the_same_result() {
         let mut fixture = fixture();
         for _ in 0..2 {
-            fixture.apply(vec![
-                change(1, "a", Change::Handle(handle("alice"))),
-                change(2, "a", Change::Status { active: true }),
-            ]);
+            fixture.fetched("a", handle("alice").or(followers(5)));
         }
 
         assert_eq!(fixture.found("ali"), ["alice.test"]);
     }
 
     #[test]
+    fn a_job_leaves_the_queue_once_every_source_answered() {
+        let mut fixture = fixture();
+
+        fixture.fetched("a", handle("alice"));
+
+        assert_eq!(fixture.store.queue_depth(Lane::Live), 0);
+        assert!(fixture.refreshed_at("a") > 0);
+    }
+
+    #[test]
+    fn a_job_with_a_failed_source_keeps_what_was_learned_and_still_ends() {
+        let mut fixture = fixture();
+        let fetched = vec![answer("a", handle("alice")), failure("a")];
+
+        fixture.refresh("a", named("Alice"), fetched);
+
+        assert_eq!(fixture.found("ali"), ["alice.test"]);
+        assert_eq!(fixture.store.queue_depth(Lane::Live), 0);
+        assert!(fixture.refreshed_at("a") > 0);
+    }
+
+    #[test]
     fn rebuild_restores_the_index_from_the_store() {
         let mut fixture = fixture();
-        fixture.apply(vec![change(1, "a", Change::Handle(handle("alice")))]);
+        fixture.fetched("a", handle("alice"));
 
         let reader = fixture.reader.clone();
         fixture.writer.rebuild().unwrap();
@@ -515,13 +517,11 @@ mod tests {
     #[test]
     fn changes_made_during_a_rebuild_are_kept() {
         let mut fixture = fixture();
-        fixture.apply(vec![change(1, "a", Change::Handle(handle("alice")))]);
+        fixture.fetched("a", handle("alice"));
 
         fixture.writer.start_rebuild().unwrap();
-        fixture.apply(vec![
-            change(2, "a", Change::Deleted),
-            change(3, "b", Change::Handle(handle("bob"))),
-        ]);
+        fixture.seen("a", status(Status::Deleted));
+        fixture.fetched("b", handle("bob"));
         fixture.writer.rebuild_step().unwrap();
 
         assert!(fixture.writer.rebuild.is_none());
@@ -542,106 +542,44 @@ mod tests {
         assert_eq!(inbox.len(), 1);
     }
 
-    fn named(name: &str) -> Profile {
-        Profile {
-            display_name: Some(name.to_owned()),
-            ..Profile::default()
-        }
-    }
-
     #[test]
-    fn a_backfill_lookup_creates_an_account_we_do_not_have() {
-        let mut fixture = fixture();
-        let ada = ProfileView {
-            profile: named("Ada"),
-            ..view("ada", 0)
-        };
-
-        fixture.apply(vec![backfilled(vec![("ada", Some(ada)), ("x", None)])]);
-
-        assert_eq!(fixture.found("ada"), ["ada.test"]);
-        assert_eq!(fixture.store.account(&did("x")).unwrap(), None);
-    }
-
-    #[test]
-    fn a_refresh_lookup_does_not_bring_back_a_deleted_account() {
-        let mut fixture = fixture();
-        fixture.apply(vec![
-            change(1, "a", Change::Handle(handle("alice"))),
-            change(2, "a", Change::Deleted),
-        ]);
-
-        fixture.apply(vec![looked_up(vec![("a", Some(view("alice", 5)))])]);
-
-        assert_eq!(fixture.store.account(&did("a")).unwrap(), None);
-        assert!(fixture.found("ali").is_empty());
-    }
-
-    #[test]
-    fn a_lookup_replaces_the_handle_and_profile_but_never_clears_the_handle() {
-        let mut fixture = fixture();
-        fixture.apply(vec![
-            change(1, "a", Change::Handle(handle("old"))),
-            change(2, "a", Change::Profile(named("Old Name"))),
-            change(3, "b", Change::Handle(handle("bob"))),
-        ]);
-        let alice = ProfileView {
-            handle: handle("new"),
-            profile: named("New Name"),
-            ..view("a", 0)
-        };
-        let bob = ProfileView {
-            handle: None,
-            ..view("b", 0)
-        };
-
-        fixture.apply(vec![looked_up(vec![("a", Some(alice)), ("b", Some(bob))])]);
-
-        assert_eq!(fixture.found("new"), ["new.test"]);
-        assert!(fixture.found("old").is_empty());
-        assert_eq!(fixture.found("bob"), ["bob.test"]);
-    }
-
-    #[test]
-    fn a_lookup_rescores_an_account_that_only_got_older() {
+    fn a_refresh_rescores_an_account_that_only_got_older() {
         let mut fixture = fixture();
         let created = now() - 400 * 86_400;
         let enrichment = Enrichment {
             followers: 0,
             created_at: Some(jiff::Timestamp::from_second(created).unwrap().to_string()),
         };
-        fixture.apply(vec![change(1, "ann", Change::Handle(handle("ann")))]);
-        let indexed = |name: &str| Actor {
-            did: did(name),
-            handle: handle(name).unwrap(),
+        let aged = Facts {
+            enrichment: Some(enrichment.clone()),
+            ..Facts::default()
+        };
+        fixture.fetched("ann", handle("ann"));
+        fixture
+            .store
+            .put_enrichment(&did("ann"), &enrichment, created)
+            .unwrap();
+        let anna = Actor {
+            did: did("anna"),
+            handle: Handle::try_from("anna.test".to_owned()).unwrap(),
             display_name: None,
             avatar_cid: None,
             labels: Vec::new(),
             created_at: None,
             verification: None,
         };
-        fixture
-            .store
-            .put_enrichment(&did("ann"), &enrichment, created)
-            .unwrap();
-        fixture.writer.index.upsert(&indexed("ann"), 0).unwrap();
-        fixture.writer.index.upsert(&indexed("anna"), 50).unwrap();
+        fixture.writer.index.upsert(&anna, 50).unwrap();
         fixture.writer.index.commit().unwrap();
         assert_eq!(fixture.found("an"), ["anna.test", "ann.test"]);
 
-        let ann = ProfileView {
-            enrichment,
-            ..view("ann", 0)
-        };
-        fixture.apply(vec![looked_up(vec![("ann", Some(ann))])]);
+        fixture.fetched("ann", aged);
 
         assert_eq!(fixture.found("an"), ["ann.test", "anna.test"]);
     }
 
     #[test]
-    fn a_lookup_stores_and_indexes_the_accounts_labels() {
+    fn labels_are_stored_and_indexed() {
         let mut fixture = fixture();
-        fixture.apply(vec![change(1, "a", Change::Handle(handle("a")))]);
         let label = Label {
             src: did("labeler"),
             uri: "did:plc:a".to_owned(),
@@ -650,12 +588,12 @@ mod tests {
             cts: "2026-01-01T00:00:00Z".to_owned(),
             exp: None,
         };
-        let a = ProfileView {
-            labels: vec![label.clone()],
-            ..view("a", 0)
+        let labelled = Facts {
+            labels: Some(vec![label.clone()]),
+            ..handle("a")
         };
 
-        fixture.apply(vec![looked_up(vec![("a", Some(a))])]);
+        fixture.fetched("a", labelled);
 
         assert_eq!(
             fixture.store.labels(&did("a")).unwrap(),
@@ -666,55 +604,29 @@ mod tests {
     }
 
     #[test]
-    fn a_verified_lookup_makes_a_filtered_handle_searchable_with_its_verification() {
+    fn a_verified_account_with_a_filtered_handle_is_searchable() {
         let mut fixture = fixture();
-        fixture.apply(vec![change(1, "coons", Change::Handle(handle("coons")))]);
+        fixture.fetched("coons", handle("coons"));
         assert!(fixture.found("coons").is_empty());
         let state = VerificationState {
             verifications: Vec::new(),
             verified_status: "valid".to_owned(),
             trusted_verifier_status: "none".to_owned(),
         };
-        let coons = ProfileView {
-            verification: Some(AppviewVerification {
-                handle: handle("coons"),
-                display_name: None,
-                state: state.clone(),
-            }),
-            ..view("coons", 0)
+        let verification = AppviewVerification {
+            handle: Handle::try_from("coons.test".to_owned()).ok(),
+            display_name: None,
+            state: state.clone(),
+        };
+        let verified = Facts {
+            verification: Some(Some(verification)),
+            ..Facts::default()
         };
 
-        fixture.apply(vec![looked_up(vec![("coons", Some(coons))])]);
+        fixture.fetched("coons", verified);
 
         let found = fixture.reader.search("coons", 1).unwrap();
         assert_eq!(found[0].handle.as_str(), "coons.test");
         assert_eq!(found[0].verification, Some(state));
-    }
-
-    #[test]
-    fn a_backfill_lookup_saves_where_backfill_resumes_and_counts_accounts() {
-        let mut fixture = fixture();
-        let progress = BackfillProgress {
-            cursor: Some("next".to_owned()),
-            finished: false,
-        };
-        let accounts = vec![(did("a"), Some(view("a", 0))), (did("x"), None)];
-
-        fixture.apply(vec![Message::LookedUp {
-            accounts,
-            source: Source::Backfill {
-                progress: progress.clone(),
-                listed: 2,
-            },
-        }]);
-
-        let state = BackfillState {
-            progress,
-            counts: BackfillCounts {
-                listed: 2,
-                filled: 1,
-            },
-        };
-        assert_eq!(fixture.store.backfill_state().unwrap(), state);
     }
 }

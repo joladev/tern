@@ -1,12 +1,14 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fjall::Keyspace;
+use serde::Deserialize;
 use types::Job;
 
 use crate::{BackfillProgress, Error, Store};
 
 const JETSTREAM_POSITION: &str = "position:jetstream";
 const BACKFILL_POSITION: &str = "position:backfill";
+const BACKFILL_STATE_BEFORE_QUEUE: &str = "backfill";
 const KEY_LEN: usize = 9;
 
 type Key = [u8; KEY_LEN];
@@ -45,7 +47,15 @@ pub enum Position {
 pub struct Queued {
     key: Key,
     pub job: Job,
-    pub attempts: u32,
+}
+
+// TODO JOHANNA: older versions saved backfill progress in this format.
+// Production finished its backfill under that version. We still read it so
+// backfill does not run again after upgrading. The old value has two
+// counters after the progress, which we ignore.
+#[derive(Deserialize)]
+struct BackfillStateBeforeQueue {
+    progress: BackfillProgress,
 }
 
 #[derive(Default)]
@@ -78,7 +88,8 @@ impl Store {
     ) -> Result<(), Error> {
         let mut batch = self.database.batch();
         for job in &jobs {
-            batch.insert(&self.queue, self.next_key(lane), encode(job, 0)?);
+            let value = postcard::to_stdvec(job)?;
+            batch.insert(&self.queue, self.next_key(lane), value);
         }
         match position {
             Some(Position::Jetstream(cursor)) => {
@@ -110,9 +121,9 @@ impl Store {
             for entry in self.queue.range(from..=key(lane, u64::MAX)).take(remaining) {
                 let (key, value) = entry.into_inner()?;
                 let key = parse_key(&key)?;
-                let (job, attempts) = postcard::from_bytes(&value)?;
+                let job = postcard::from_bytes(&value)?;
                 head.store(sequence(&key) + 1, Ordering::Relaxed);
-                jobs.push(Queued { key, job, attempts });
+                jobs.push(Queued { key, job });
             }
         }
         Ok(jobs)
@@ -131,18 +142,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn retry(&self, job: Queued) -> Result<(), Error> {
-        let lane = Lane::of(&job.key)?;
-        let mut batch = self.database.batch();
-        batch.remove(&self.queue, job.key);
-        batch.insert(
-            &self.queue,
-            self.next_key(lane),
-            encode(&job.job, job.attempts + 1)?,
-        );
-        Ok(batch.commit()?)
-    }
-
     pub fn queue_depth(&self, lane: Lane) -> usize {
         self.queue_state.depths[lane.index()].load(Ordering::Relaxed)
     }
@@ -155,10 +154,14 @@ impl Store {
     }
 
     pub fn backfill_position(&self) -> Result<BackfillProgress, Error> {
-        let Some(bytes) = self.meta.get(BACKFILL_POSITION)? else {
+        if let Some(bytes) = self.meta.get(BACKFILL_POSITION)? {
+            return Ok(postcard::from_bytes(&bytes)?);
+        }
+        let Some(bytes) = self.meta.get(BACKFILL_STATE_BEFORE_QUEUE)? else {
             return Ok(BackfillProgress::default());
         };
-        Ok(postcard::from_bytes(&bytes)?)
+        let state: BackfillStateBeforeQueue = postcard::from_bytes(&bytes)?;
+        Ok(state.progress)
     }
 
     fn next_key(&self, lane: Lane) -> Key {
@@ -185,10 +188,6 @@ fn sequence(key: &Key) -> u64 {
     let mut sequence = [0; 8];
     sequence.copy_from_slice(&key[1..]);
     u64::from_be_bytes(sequence)
-}
-
-fn encode(job: &Job, attempts: u32) -> Result<Vec<u8>, Error> {
-    Ok(postcard::to_stdvec(&(job, attempts))?)
 }
 
 #[cfg(test)]
@@ -259,22 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn a_retried_job_goes_to_the_back_with_one_more_attempt() {
-        let (_dir, store) = open();
-        store
-            .enqueue(Lane::Live, vec![job("a"), job("b")], None)
-            .unwrap();
-        let mut jobs = store.next_jobs(1).unwrap();
-
-        store.retry(jobs.remove(0)).unwrap();
-
-        let jobs = store.next_jobs(10).unwrap();
-        assert_eq!(names(&jobs), ["did:plc:b", "did:plc:a"]);
-        let attempts: Vec<_> = jobs.iter().map(|queued| queued.attempts).collect();
-        assert_eq!(attempts, [0, 1]);
-    }
-
-    #[test]
     fn jobs_are_saved_together_with_the_trigger_position() {
         let (dir, store) = open();
         let progress = BackfillProgress {
@@ -300,6 +283,23 @@ mod tests {
         assert_eq!(store.backfill_position().unwrap(), progress);
         let jobs = store.next_jobs(10).unwrap();
         assert_eq!(names(&jobs), ["did:plc:a", "did:plc:b"]);
+    }
+
+    #[test]
+    fn a_backfill_finished_before_the_queue_existed_stays_finished() {
+        let (_dir, store) = open();
+        let progress = BackfillProgress {
+            cursor: None,
+            finished: true,
+        };
+        let counts = (10_u64, 4_u64);
+        let bytes = postcard::to_stdvec(&(progress, counts)).unwrap();
+        store
+            .meta
+            .insert(BACKFILL_STATE_BEFORE_QUEUE, bytes)
+            .unwrap();
+
+        assert!(store.backfill_position().unwrap().finished);
     }
 
     #[test]

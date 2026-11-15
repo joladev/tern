@@ -56,28 +56,13 @@ impl World {
     }
 
     fn emit_profile(&mut self, account: &Account) {
-        let mut record = json!({ "$type": "app.bsky.actor.profile" });
-        if let Some(name) = &account.display_name {
-            record["displayName"] = json!(name);
-        }
-        if let Some(created_at) = &account.created_at {
-            record["createdAt"] = json!(created_at);
-        }
-        if let Some(cid) = &account.avatar_cid {
-            record["avatar"] = json!({
-                "$type": "blob",
-                "mimeType": "image/jpeg",
-                "ref": { "$link": cid },
-                "size": 1,
-            });
-        }
         self.emit(
             "commit",
             &account.did,
             json!({
                 "collection": "app.bsky.actor.profile",
                 "operation": "update",
-                "record": record,
+                "record": profile_record(account),
                 "rev": "3mock",
                 "rkey": "self",
             }),
@@ -96,6 +81,25 @@ impl World {
         self.frames.push(frame.clone());
         let _ = self.live.send((seq, frame));
     }
+}
+
+fn profile_record(account: &Account) -> Value {
+    let mut record = json!({ "$type": "app.bsky.actor.profile" });
+    if let Some(name) = &account.display_name {
+        record["displayName"] = json!(name);
+    }
+    if let Some(created_at) = &account.created_at {
+        record["createdAt"] = json!(created_at);
+    }
+    if let Some(cid) = &account.avatar_cid {
+        record["avatar"] = json!({
+            "$type": "blob",
+            "mimeType": "image/jpeg",
+            "ref": { "$link": cid },
+            "size": 1,
+        });
+    }
+    record
 }
 
 fn now() -> String {
@@ -138,6 +142,7 @@ pub async fn run(
             "/xrpc/com.bad-example.identity.resolveMiniDoc",
             get(resolve_mini_doc),
         )
+        .route("/xrpc/com.atproto.repo.getRecord", get(get_record))
         .route("/xrpc/app.bsky.actor.getProfiles", get(get_profiles))
         .route("/xrpc/com.atproto.sync.listRepos", get(list_repos))
         .route("/xrpc/blue.microcosm.hubble.getStats", get(get_stats))
@@ -218,6 +223,33 @@ async fn resolve_mini_doc(
             let body = json!({
                 "error": "InvalidRequest",
                 "message": "Failed to get DID doc",
+            });
+            (StatusCode::BAD_REQUEST, Json(body)).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RecordParams {
+    repo: String,
+}
+
+async fn get_record(
+    State(world): State<SharedWorld>,
+    Query(params): Query<RecordParams>,
+) -> Response {
+    let world = world.lock().expect("the world lock is not poisoned");
+    match world.accounts.get(&params.repo) {
+        Some(account) => Json(json!({
+            "uri": format!("at://{}/app.bsky.actor.profile/self", account.did),
+            "cid": "bafyreimock",
+            "value": profile_record(account),
+        }))
+        .into_response(),
+        None => {
+            let body = json!({
+                "error": "RecordNotFound",
+                "message": "Could not locate record",
             });
             (StatusCode::BAD_REQUEST, Json(body)).into_response()
         }

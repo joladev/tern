@@ -12,7 +12,6 @@ use types::{Account, Did, Enrichment, Label};
 use queue::QueueState;
 pub use queue::{Lane, Position, Queued};
 
-const BACKFILL_STATE: &str = "backfill";
 const ENRICHMENT: &str = "counts";
 const LABELS: &str = "labels";
 
@@ -66,18 +65,6 @@ impl LabelOrigin {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct BackfillCounts {
-    pub listed: u64,
-    pub filled: u64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct BackfillState {
-    pub progress: BackfillProgress,
-    pub counts: BackfillCounts,
-}
-
 pub struct Store {
     database: Database,
     accounts: Keyspace,
@@ -127,9 +114,13 @@ impl Store {
         Ok(self.accounts.insert(did.as_str(), value)?)
     }
 
-    pub fn delete_account(&self, did: &Did) -> Result<(), Error> {
+    pub fn blank_account(&self, did: &Did) -> Result<(), Error> {
+        let blank = Account {
+            active: false,
+            ..Account::default()
+        };
         let mut batch = self.database.batch();
-        batch.remove(&self.accounts, did.as_str());
+        batch.insert(&self.accounts, did.as_str(), postcard::to_stdvec(&blank)?);
         batch.remove(&self.enrichment, did.as_str());
         for entry in self.labels.prefix(labels_prefix(did)) {
             batch.remove(&self.labels, entry.key()?);
@@ -212,6 +203,7 @@ impl Store {
         let last = rows.last().map(|(did, _, _)| did.clone());
         let stale = rows
             .into_iter()
+            .filter(|(_, account, _)| account.active)
             .filter(|(_, _, row)| row.as_ref().is_none_or(|row| row.fetched_at < cutoff))
             .map(|(did, _, _)| did)
             .collect();
@@ -220,18 +212,6 @@ impl Store {
 
     pub fn has_account(&self, did: &Did) -> Result<bool, Error> {
         Ok(self.accounts.contains_key(did.as_str())?)
-    }
-
-    pub fn backfill_state(&self) -> Result<BackfillState, Error> {
-        let Some(bytes) = self.meta.get(BACKFILL_STATE)? else {
-            return Ok(BackfillState::default());
-        };
-        Ok(postcard::from_bytes(&bytes)?)
-    }
-
-    pub fn put_backfill_state(&self, state: &BackfillState) -> Result<(), Error> {
-        let value = postcard::to_stdvec(state)?;
-        Ok(self.meta.insert(BACKFILL_STATE, value)?)
     }
 
     pub fn persist(&self) -> Result<(), Error> {
@@ -378,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_an_account_removes_all_of_its_data() {
+    fn blanking_an_account_keeps_only_an_inactive_row() {
         let (_dir, store) = open();
         let alice = did("alice");
         let enrichment = Enrichment {
@@ -391,9 +371,13 @@ mod tests {
             .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
             .unwrap();
 
-        store.delete_account(&alice).unwrap();
+        store.blank_account(&alice).unwrap();
 
-        assert_eq!(store.account(&alice).unwrap(), None);
+        let blank = Account {
+            active: false,
+            ..Account::default()
+        };
+        assert_eq!(store.account(&alice).unwrap(), Some(blank));
         assert_eq!(store.enrichment(&alice).unwrap(), Enrichment::default());
         assert!(store.labels(&alice).unwrap().is_empty());
     }
@@ -533,22 +517,17 @@ mod tests {
     }
 
     #[test]
-    fn saves_backfill_state() {
+    fn a_scan_skips_inactive_accounts() {
         let (_dir, store) = open();
-        assert_eq!(store.backfill_state().unwrap(), BackfillState::default());
-
-        let state = BackfillState {
-            progress: BackfillProgress {
-                cursor: Some("page2".to_owned()),
-                finished: false,
-            },
-            counts: BackfillCounts {
-                listed: 10,
-                filled: 4,
-            },
+        let inactive = Account {
+            active: false,
+            ..account("x.test")
         };
-        store.put_backfill_state(&state).unwrap();
+        store.put_account(&did("a"), &inactive).unwrap();
 
-        assert_eq!(store.backfill_state().unwrap(), state);
+        let scan = store.scan_stale(None, 20, 3).unwrap();
+
+        assert!(scan.stale.is_empty());
+        assert_eq!(scan.last, Some(did("a")));
     }
 }

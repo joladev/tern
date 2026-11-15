@@ -98,25 +98,26 @@ impl Client {
     }
 
     pub async fn identities(&self, dids: &[Did], concurrency: usize) -> Fetched {
-        let handle = |did| async move { self.resolve_handle(did).await.map(handle_facts) };
-        fetch_each(dids, concurrency, handle).await
+        let calls = dids.iter().map(|did| async move {
+            let handle = self.resolve_handle(did).await;
+            (did, handle.map(handle_facts))
+        });
+        gather(calls.collect(), concurrency).await
     }
 
     pub async fn profiles(&self, dids: &[Did], concurrency: usize) -> Fetched {
-        let profile = |did| async move { self.profile(did).await.map(profile_facts) };
-        fetch_each(dids, concurrency, profile).await
+        let calls = dids.iter().map(|did| async move {
+            let profile = self.profile(did).await;
+            (did, profile.map(profile_facts))
+        });
+        gather(calls.collect(), concurrency).await
     }
 }
 
-async fn fetch_each<'a, F, Fut>(dids: &'a [Did], concurrency: usize, fetch: F) -> Fetched
+async fn gather<'a, Call>(calls: Vec<Call>, concurrency: usize) -> Fetched
 where
-    F: Fn(&'a Did) -> Fut,
-    Fut: Future<Output = Result<Facts, Error>>,
+    Call: Future<Output = (&'a Did, Result<Facts, Error>)>,
 {
-    let calls = dids.iter().map(|did| {
-        let call = fetch(did);
-        async move { (did, call.await) }
-    });
     let mut calls = stream::iter(calls).buffer_unordered(concurrency);
     let mut fetched = Fetched::default();
     while let Some((did, result)) = calls.next().await {

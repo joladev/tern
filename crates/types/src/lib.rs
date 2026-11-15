@@ -253,6 +253,19 @@ pub struct Facts {
     pub verification: Option<Option<AppviewVerification>>,
 }
 
+impl Facts {
+    pub fn or(self, other: Facts) -> Facts {
+        Facts {
+            handle: self.handle.or(other.handle),
+            profile: self.profile.or(other.profile),
+            status: self.status.or(other.status),
+            enrichment: self.enrichment.or(other.enrichment),
+            labels: self.labels.or(other.labels),
+            verification: self.verification.or(other.verification),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Job {
     pub did: Did,

@@ -1,7 +1,11 @@
+use std::collections::HashMap;
+
+use futures_util::stream::{self, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
 use types::{
-    AppviewVerification, Did, Enrichment, Handle, Label, Profile, Verification, VerificationState,
+    AppviewVerification, Did, Enrichment, Facts, Fetched, Handle, Label, Profile, Verification,
+    VerificationState,
 };
 
 const GET_PROFILES_PATH: &str = "/xrpc/app.bsky.actor.getProfiles";
@@ -193,6 +197,49 @@ impl Client {
         let body: Profiles = response.json().await.map_err(Error::Body)?;
         Ok(body.profiles.into_iter().map(ProfileView::from).collect())
     }
+
+    pub async fn facts(&self, dids: &[Did], concurrency: usize) -> Fetched {
+        let calls = dids
+            .chunks(MAX_ACCOUNTS_PER_CALL)
+            .map(|dids| async move { (dids, self.profiles(dids).await) });
+        let mut calls = stream::iter(calls).buffer_unordered(concurrency);
+        let mut fetched = Fetched::default();
+        while let Some((dids, result)) = calls.next().await {
+            match result {
+                Ok(views) => fetched.facts.extend(facts_for(dids, views)),
+                Err(err) => {
+                    let error = &err as &dyn std::error::Error;
+                    tracing::warn!(error, "AppView call failed");
+                    fetched.failed.extend_from_slice(dids);
+                }
+            }
+        }
+        fetched
+    }
+}
+
+fn facts_for(dids: &[Did], views: Vec<ProfileView>) -> HashMap<Did, Facts> {
+    let mut views: HashMap<_, _> = views
+        .into_iter()
+        .map(|view| (view.did.clone(), view))
+        .collect();
+    dids.iter()
+        .map(|did| {
+            let facts = match views.remove(did) {
+                Some(view) => Facts {
+                    enrichment: Some(view.enrichment),
+                    labels: Some(view.labels),
+                    verification: Some(view.verification),
+                    ..Facts::default()
+                },
+                None => Facts {
+                    enrichment: Some(Enrichment::default()),
+                    ..Facts::default()
+                },
+            };
+            (did.clone(), facts)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -294,5 +341,36 @@ mod tests {
         assert_eq!(avatar_cid(url).as_deref(), Some("bafkrei"));
         let plain = "https://cdn.bsky.app/img/avatar/plain/did:plc:x/bafkrei";
         assert_eq!(avatar_cid(plain).as_deref(), Some("bafkrei"));
+    }
+
+    #[test]
+    fn an_account_the_appview_leaves_out_gets_empty_enrichment() {
+        let did = |name: &str| Did::try_from(format!("did:plc:{name}")).unwrap();
+        let known = ProfileView {
+            did: did("known"),
+            handle: None,
+            profile: Profile::default(),
+            enrichment: Enrichment {
+                followers: 5,
+                created_at: None,
+            },
+            labels: Vec::new(),
+            verification: None,
+        };
+
+        let facts = facts_for(&[did("known"), did("unknown")], vec![known.clone()]);
+
+        let known_facts = Facts {
+            enrichment: Some(known.enrichment),
+            labels: Some(Vec::new()),
+            verification: Some(None),
+            ..Facts::default()
+        };
+        let unknown_facts = Facts {
+            enrichment: Some(Enrichment::default()),
+            ..Facts::default()
+        };
+        assert_eq!(facts[&did("known")], known_facts);
+        assert_eq!(facts[&did("unknown")], unknown_facts);
     }
 }

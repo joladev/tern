@@ -1,8 +1,13 @@
+use futures_util::stream::{self, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
-use types::{Did, Handle};
+use types::{Did, Facts, Fetched, Handle, HandleFact, Profile, ProfileRecord};
 
 const RESOLVE_PATH: &str = "/xrpc/com.bad-example.identity.resolveMiniDoc";
+const GET_RECORD_PATH: &str = "/xrpc/com.atproto.repo.getRecord";
+const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
+const PROFILE_RKEY: &str = "self";
+const RECORD_NOT_FOUND: &str = "RecordNotFound";
 
 #[derive(Clone)]
 pub struct Client {
@@ -32,6 +37,16 @@ struct MiniDoc {
     handle: String,
 }
 
+#[derive(Deserialize)]
+struct Record {
+    value: ProfileRecord,
+}
+
+#[derive(Deserialize)]
+struct Failure {
+    error: String,
+}
+
 impl Client {
     pub fn new(http: HttpClient, base_url: String) -> Client {
         Client { http, base_url }
@@ -54,5 +69,140 @@ impl Client {
 
         let doc: MiniDoc = response.json().await.map_err(Error::Body)?;
         Ok(Handle::try_from(doc.handle).map_or(Resolution::Invalid, Resolution::Handle))
+    }
+
+    pub async fn profile(&self, did: &Did) -> Result<Profile, Error> {
+        let response = self
+            .http
+            .get(format!("{}{GET_RECORD_PATH}", self.base_url))
+            .query(&[
+                ("repo", did.as_str()),
+                ("collection", PROFILE_COLLECTION),
+                ("rkey", PROFILE_RKEY),
+            ])
+            .send()
+            .await
+            .map_err(Error::Request)?;
+
+        match response.status() {
+            StatusCode::OK => {
+                let record: Record = response.json().await.map_err(Error::Body)?;
+                Ok(Profile::from(record.value))
+            }
+            StatusCode::BAD_REQUEST => {
+                let failure: Failure = response.json().await.map_err(Error::Body)?;
+                profile_without_record(&failure)
+            }
+            status => Err(Error::Status(status)),
+        }
+    }
+
+    pub async fn identities(&self, dids: &[Did], concurrency: usize) -> Fetched {
+        let handle = |did| async move { self.resolve_handle(did).await.map(handle_facts) };
+        fetch_each(dids, concurrency, handle).await
+    }
+
+    pub async fn profiles(&self, dids: &[Did], concurrency: usize) -> Fetched {
+        let profile = |did| async move { self.profile(did).await.map(profile_facts) };
+        fetch_each(dids, concurrency, profile).await
+    }
+}
+
+async fn fetch_each<'a, F, Fut>(dids: &'a [Did], concurrency: usize, fetch: F) -> Fetched
+where
+    F: Fn(&'a Did) -> Fut,
+    Fut: Future<Output = Result<Facts, Error>>,
+{
+    let calls = dids.iter().map(|did| {
+        let call = fetch(did);
+        async move { (did, call.await) }
+    });
+    let mut calls = stream::iter(calls).buffer_unordered(concurrency);
+    let mut fetched = Fetched::default();
+    while let Some((did, result)) = calls.next().await {
+        match result {
+            Ok(facts) => {
+                fetched.facts.insert(did.clone(), facts);
+            }
+            Err(err) => {
+                let error = &err as &dyn std::error::Error;
+                tracing::warn!(%did, error, "Slingshot call failed");
+                fetched.failed.push(did.clone());
+            }
+        }
+    }
+    fetched
+}
+
+fn handle_facts(resolution: Resolution) -> Facts {
+    let handle = match resolution {
+        Resolution::Handle(handle) => Some(HandleFact::Resolved(handle)),
+        Resolution::Invalid => Some(HandleFact::Invalid),
+        Resolution::Unknown => None,
+    };
+    Facts {
+        handle,
+        ..Facts::default()
+    }
+}
+
+fn profile_facts(profile: Profile) -> Facts {
+    Facts {
+        profile: Some(profile),
+        ..Facts::default()
+    }
+}
+
+fn profile_without_record(failure: &Failure) -> Result<Profile, Error> {
+    if failure.error == RECORD_NOT_FOUND {
+        return Ok(Profile::default());
+    }
+    Err(Error::Status(StatusCode::BAD_REQUEST))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_invalid_handle_is_reported_as_invalid() {
+        let facts = handle_facts(Resolution::Invalid);
+        assert_eq!(facts.handle, Some(HandleFact::Invalid));
+    }
+
+    #[test]
+    fn reads_the_profile_from_a_record() {
+        let body = r#"{
+            "uri": "at://did:plc:x/app.bsky.actor.profile/self",
+            "cid": "bafyrei",
+            "value": {
+                "$type": "app.bsky.actor.profile",
+                "displayName": "Alice",
+                "avatar": {"$type": "blob", "ref": {"$link": "bafkrei"}, "size": 1}
+            }
+        }"#;
+        let record: Record = serde_json::from_str(body).unwrap();
+
+        let profile = Profile {
+            display_name: Some("Alice".to_owned()),
+            avatar_cid: Some("bafkrei".to_owned()),
+        };
+        assert_eq!(Profile::from(record.value), profile);
+    }
+
+    #[test]
+    fn an_account_without_a_profile_record_has_an_empty_profile() {
+        let missing = Failure {
+            error: RECORD_NOT_FOUND.to_owned(),
+        };
+        assert_eq!(
+            profile_without_record(&missing).unwrap(),
+            Profile::default()
+        );
+
+        let other = Failure {
+            error: "InvalidRequest".to_owned(),
+        };
+        assert!(profile_without_record(&other).is_err());
     }
 }

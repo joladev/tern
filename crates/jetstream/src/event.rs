@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use types::{Did, Profile};
+use types::{Did, Profile, ProfileRecord};
 
 const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
 const PROFILE_RKEY: &str = "self";
@@ -72,35 +72,6 @@ struct AccountStatus {
     status: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileRecord {
-    display_name: Option<String>,
-    avatar: Option<Blob>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Blob {
-    Current { r#ref: BlobRef },
-    Legacy { cid: String },
-}
-
-impl Blob {
-    fn into_cid(self) -> String {
-        match self {
-            Blob::Current { r#ref } => r#ref.link,
-            Blob::Legacy { cid } => cid,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct BlobRef {
-    #[serde(rename = "$link")]
-    link: String,
-}
-
 impl Frame {
     pub fn parse(text: &str) -> Result<Frame, ParseError> {
         let raw: RawFrame = serde_json::from_str(text).map_err(ParseError)?;
@@ -152,15 +123,6 @@ impl AccountStatus {
         }
         EventKind::Status {
             active: self.active,
-        }
-    }
-}
-
-impl From<ProfileRecord> for Profile {
-    fn from(record: ProfileRecord) -> Profile {
-        Profile {
-            display_name: types::display_name(record.display_name),
-            avatar_cid: record.avatar.map(Blob::into_cid),
         }
     }
 }

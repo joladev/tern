@@ -1,5 +1,6 @@
 mod slurs;
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,44 @@ pub fn display_name(name: Option<String>) -> Option<String> {
     Some(name)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileRecord {
+    display_name: Option<String>,
+    avatar: Option<Blob>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Blob {
+    Current { r#ref: BlobRef },
+    Legacy { cid: String },
+}
+
+impl Blob {
+    fn into_cid(self) -> String {
+        match self {
+            Blob::Current { r#ref } => r#ref.link,
+            Blob::Legacy { cid } => cid,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct BlobRef {
+    #[serde(rename = "$link")]
+    link: String,
+}
+
+impl From<ProfileRecord> for Profile {
+    fn from(record: ProfileRecord) -> Profile {
+        Profile {
+            display_name: display_name(record.display_name),
+            avatar_cid: record.avatar.map(Blob::into_cid),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Label {
     pub src: Did,
@@ -211,6 +250,7 @@ pub struct Facts {
     pub status: Option<Status>,
     pub enrichment: Option<Enrichment>,
     pub labels: Option<Vec<Label>>,
+    pub verification: Option<Option<AppviewVerification>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -219,9 +259,12 @@ pub struct Job {
     pub seen: Facts,
 }
 
-/// Datetimes from other services are kept as the text they sent, so they pass
-/// through unchanged. They are checked with this when they are read, and parsed
-/// again only where they are used as times.
+#[derive(Debug, Default, PartialEq)]
+pub struct Fetched {
+    pub facts: HashMap<Did, Facts>,
+    pub failed: Vec<Did>,
+}
+
 pub fn parse_datetime(value: &str) -> Option<jiff::Timestamp> {
     value.parse().ok()
 }

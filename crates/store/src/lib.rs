@@ -1,4 +1,5 @@
 mod migration;
+mod queue;
 
 use std::iter::Peekable;
 use std::ops::Bound;
@@ -7,6 +8,9 @@ use std::path::Path;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, KvPair, PersistMode, Slice};
 use serde::{Deserialize, Serialize};
 use types::{Account, Did, Enrichment, Label};
+
+use queue::QueueState;
+pub use queue::{Lane, Position, Queued};
 
 const BACKFILL_STATE: &str = "backfill";
 const ENRICHMENT: &str = "counts";
@@ -20,6 +24,8 @@ pub enum Error {
     Codec(#[from] postcard::Error),
     #[error("found a malformed DID in the store")]
     BadDid(#[source] types::ParseError),
+    #[error("found a malformed key in the queue")]
+    BadQueueKey,
     #[error("the store has format {0}, which this build does not support")]
     UnsupportedFormat(u32),
 }
@@ -78,6 +84,8 @@ pub struct Store {
     enrichment: Keyspace,
     labels: Keyspace,
     meta: Keyspace,
+    queue: Keyspace,
+    queue_state: QueueState,
 }
 
 impl Store {
@@ -87,12 +95,16 @@ impl Store {
         let enrichment = database.keyspace(ENRICHMENT, KeyspaceCreateOptions::default)?;
         let labels = database.keyspace(LABELS, KeyspaceCreateOptions::default)?;
         let meta = database.keyspace("meta", KeyspaceCreateOptions::default)?;
+        let queue = database.keyspace("queue", KeyspaceCreateOptions::default)?;
+        let queue_state = QueueState::load(&queue)?;
         let store = Store {
             database,
             accounts,
             enrichment,
             labels,
             meta,
+            queue,
+            queue_state,
         };
         store.migrate()?;
         Ok(store)

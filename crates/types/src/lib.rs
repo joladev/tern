@@ -191,6 +191,34 @@ pub struct Enrichment {
     pub created_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum HandleFact {
+    Resolved(Handle),
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum Status {
+    Active,
+    Inactive,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct Facts {
+    pub handle: Option<HandleFact>,
+    pub profile: Option<Profile>,
+    pub status: Option<Status>,
+    pub enrichment: Option<Enrichment>,
+    pub labels: Option<Vec<Label>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Job {
+    pub did: Did,
+    pub seen: Facts,
+}
+
 /// Datetimes from other services are kept as the text they sent, so they pass
 /// through unchanged. They are checked with this when they are read, and parsed
 /// again only where they are used as times.

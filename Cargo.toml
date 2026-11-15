@@ -45,3 +45,7 @@ types = { path = "crates/types" }
 
 [workspace.lints.clippy]
 cast_lossless = "warn"
+
+[profile.dev.package.tikv-jemalloc-sys]
+# CI runs with `_FORTIFY_SOURCE` which prints warnings for unoptimized builds and jemalloc fails build on warnings.
+opt-level = 1

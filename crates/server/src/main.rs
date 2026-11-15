@@ -145,7 +145,7 @@ fn init_logging(format: LogFormat) {
 async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
     let store = open_store(data_dir)?;
     let (reader, index) = open_index(data_dir)?;
-    let cursor = store.jetstream_position()?.or(index.cursor());
+    let cursor = store.jetstream_position()?;
     tracing::info!(?cursor, "starting");
 
     let exporter = Arc::new(Exporter::install()?);

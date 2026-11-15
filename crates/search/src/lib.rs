@@ -311,27 +311,12 @@ mod tests {
         assert_eq!(handles(&reader, "a", 2).len(), 2);
     }
 
-    #[test]
-    fn the_cursor_survives_a_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_reader, mut writer) = open(&index_path(&dir)).unwrap();
-        assert_eq!(writer.cursor(), None);
-
-        writer.set_cursor(42);
-        writer.commit().unwrap();
-        drop(writer);
-
-        let (_reader, writer) = open(&index_path(&dir)).unwrap();
-        assert_eq!(writer.cursor(), Some(42));
-    }
-
     fn open_older_index(dir: &tempfile::TempDir) -> (Reader, Writer) {
         let (_reader, mut writer) = open(&index_path(dir)).unwrap();
         writer.use_older_format().unwrap();
         writer
             .upsert(&actor("alice", Some("Alice Liddell")), 1)
             .unwrap();
-        writer.set_cursor(7);
         writer.commit().unwrap();
         drop(writer);
         open(&index_path(dir)).unwrap()
@@ -373,7 +358,6 @@ mod tests {
 
         let (reader, writer) = open(&index_path(&dir)).unwrap();
         assert!(!writer.needs_rebuild());
-        assert_eq!(writer.cursor(), Some(7));
         assert_eq!(handles(&reader, "bob", 10), ["bob.bsky.social"]);
     }
 

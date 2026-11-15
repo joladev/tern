@@ -29,7 +29,6 @@ pub struct Writer {
     next: Option<Side>,
     snapshot: Arc<ArcSwap<Snapshot>>,
     fields: Fields,
-    cursor: Option<u64>,
 }
 
 impl Writer {
@@ -38,19 +37,18 @@ impl Writer {
         let live_path = slots.live()?;
         remove_dir(slots.other(&live_path))?;
 
-        let (live, payload) = Side::open(&live_path)?;
-        Writer::new(Some(slots), live, payload.cursor)
+        let live = Side::open(&live_path)?;
+        Writer::new(Some(slots), live)
     }
 
     pub(crate) fn open_in_memory() -> Result<(Writer, Arc<ArcSwap<Snapshot>>, Fields), Error> {
         let live = Side::from_index(&memory_index()?, FORMAT)?;
-        Writer::new(None, live, None)
+        Writer::new(None, live)
     }
 
     fn new(
         slots: Option<Slots>,
         live: Side,
-        cursor: Option<u64>,
     ) -> Result<(Writer, Arc<ArcSwap<Snapshot>>, Fields), Error> {
         let snapshot = Arc::new(ArcSwap::from_pointee(Snapshot::load(&live.reader)?));
         let (_, fields) = schema::build();
@@ -60,17 +58,8 @@ impl Writer {
             next: None,
             snapshot: Arc::clone(&snapshot),
             fields,
-            cursor,
         };
         Ok((writer, snapshot, fields))
-    }
-
-    pub fn cursor(&self) -> Option<u64> {
-        self.cursor
-    }
-
-    pub fn set_cursor(&mut self, cursor: u64) {
-        self.cursor = Some(cursor);
     }
 
     pub fn num_docs(&self) -> u64 {
@@ -129,7 +118,7 @@ impl Writer {
             .into_iter()
             .flatten()
         {
-            side.commit(self.cursor)?;
+            side.commit()?;
         }
         self.live.reader.reload()?;
         self.publish()
@@ -208,7 +197,7 @@ struct Side {
 }
 
 impl Side {
-    fn open(path: &Path) -> Result<(Side, Payload), Error> {
+    fn open(path: &Path) -> Result<Side, Error> {
         let index = open_index(path)?;
         let payload = Payload::read(&index)?;
         let format = if index.schema() == schema::build().0 {
@@ -216,8 +205,7 @@ impl Side {
         } else {
             0
         };
-        let side = Side::from_index(&index, format)?;
-        Ok((side, payload))
+        Side::from_index(&index, format)
     }
 
     fn from_index(index: &Index, format: u32) -> Result<Side, Error> {
@@ -253,10 +241,9 @@ impl Side {
         known_only
     }
 
-    fn commit(&mut self, cursor: Option<u64>) -> Result<(), Error> {
+    fn commit(&mut self) -> Result<(), Error> {
         let mut commit = self.writer.prepare_commit()?;
         let payload = Payload {
-            cursor,
             format: self.format,
         };
         commit.set_payload(&payload.encode());
@@ -299,7 +286,6 @@ fn index_builder() -> IndexBuilder {
 
 #[derive(Deserialize, Serialize)]
 struct Payload {
-    cursor: Option<u64>,
     format: u32,
 }
 
@@ -310,10 +296,7 @@ impl Payload {
 
     fn read(index: &Index) -> Result<Payload, Error> {
         let Some(text) = index.load_metas()?.payload else {
-            return Ok(Payload {
-                cursor: None,
-                format: 0,
-            });
+            return Ok(Payload { format: 0 });
         };
         serde_json::from_str(&text).map_err(|_| Error::BadPayload(text))
     }
@@ -427,7 +410,7 @@ mod tests {
         let did = writer.did_term(&actor(Vec::new()).did);
         side.replace(did, writer.document(&actor(Vec::new()), 1))
             .unwrap();
-        side.commit(None).unwrap();
+        side.commit().unwrap();
     }
 
     #[test]

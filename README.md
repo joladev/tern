@@ -46,15 +46,13 @@ There's also an `app.bsky.actor.searchActorsTypeahead` alias.
 tern discovers new accounts and account changes through jetstream or backfill. The jetstream events just have dids, so tern uses Slingshot to find the handle. This means search should reflect handle changes within seconds. New accounts discovered on the jetstream, or through backfill, are scheduled for enrichment, aka fetching data for scoring. Currently this uses the Bluesky appview and relies on things like account age and follower counts. You can override the appview. A future version may also utilize constellation to count backlinks as a secondary metric for accounts that don't use Bluesky.
 
 ```text
-Jetstream ──> ingest ────────────────────────> writer ──> fjall
-               │ asks                            ▲   └──> Tantivy ──> HTTP API
-               ▼                                 │
-           Slingshot                             │
-backfill ───────────┐                            │
-refresh  ───────────┴──> lookup queue ──> lookups┘
-                                             │ asks
-                                             ▼
-                                          AppView
+Jetstream ──────┐
+backfill (once) ┼─ add jobs ─> work queue ─> refresh ── asks all at once ──> Slingshot identity
+stale scan ─────┘              (in fjall)       │                           Slingshot profile record
+                                                │                           Bluesky AppView
+                                                ▼
+                                             writer ──> fjall
+                                                   └──> Tantivy ──> HTTP API
 ```
 
 An account is considered stale after a week and scheduled for refresh, which captures changes in follower counts.
@@ -67,6 +65,16 @@ Relevant commands:
 * `just test-integration`
 * `just lint`
 * `just dev`
+
+## Roadmap
+
+- [x] Surface labels
+- [x] Filter bad words
+- [ ] Subscribe to labelers
+- [ ] Retries with full jitter exponential backoff
+- [ ] Record reason why an account is inactive
+- [ ] Paginating hubble as an alternative to looking for stale accounts
+- [ ] Constellation backlinks as a fallback for counting followers
 
 ## License
 

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use futures_util::stream::{self, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
@@ -99,7 +101,11 @@ impl Client {
 
     pub async fn identities(&self, dids: &[Did], concurrency: usize) -> Fetched {
         let calls = dids.iter().map(|did| async move {
+            let start = Instant::now();
             let handle = self.resolve_handle(did).await;
+            metrics::histogram!("tern_handle_lookup_seconds").record(start.elapsed());
+            metrics::counter!("tern_handle_lookups_total", "outcome" => outcome(&handle))
+                .increment(1);
             (did, handle.map(handle_facts))
         });
         gather(calls.collect(), concurrency).await
@@ -133,6 +139,15 @@ where
         }
     }
     fetched
+}
+
+fn outcome(result: &Result<Resolution, Error>) -> &'static str {
+    match result {
+        Ok(Resolution::Handle(_)) => "handle",
+        Ok(Resolution::Invalid) => "invalid",
+        Ok(Resolution::Unknown) => "unknown",
+        Err(_) => "error",
+    }
 }
 
 fn handle_facts(resolution: Resolution) -> Facts {

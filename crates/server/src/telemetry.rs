@@ -33,6 +33,12 @@ impl Exporter {
             })
             .and_then(|builder| {
                 builder.set_buckets_for_metric(
+                    Matcher::Full("tern_handle_lookup_seconds".to_owned()),
+                    LOOKUP_BUCKETS,
+                )
+            })
+            .and_then(|builder| {
+                builder.set_buckets_for_metric(
                     Matcher::Full("tern_commit_seconds".to_owned()),
                     COMMIT_BUCKETS,
                 )

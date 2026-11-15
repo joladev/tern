@@ -73,6 +73,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "jiff",
+ "metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -2883,6 +2884,7 @@ name = "slingshot"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "metrics",
  "reqwest",
  "serde",
  "serde_json",

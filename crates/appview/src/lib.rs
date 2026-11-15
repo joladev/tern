@@ -206,6 +206,8 @@ impl Client {
         let mut calls = stream::iter(calls).buffer_unordered(concurrency);
         let mut fetched = Fetched::default();
         while let Some((dids, result)) = calls.next().await {
+            let outcome = if result.is_ok() { "success" } else { "failure" };
+            metrics::counter!("tern_enrichment_calls_total", "outcome" => outcome).increment(1);
             match result {
                 Ok(views) => fetched.facts.extend(facts_for(dids, views)),
                 Err(err) => {

@@ -35,7 +35,6 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const WRITER_QUEUE_SIZE: usize = 1024;
 const JETSTREAM_QUEUE_SIZE: usize = 10_000;
-const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 

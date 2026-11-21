@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use search::Actor;
@@ -8,9 +8,10 @@ use tokio::sync::mpsc;
 use tokio::task::block_in_place;
 use types::{Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, Status};
 
-use crate::{COMMIT_INTERVAL, score::Scorer};
+use crate::score::Scorer;
 
 const REBUILD_CHUNK: usize = 1000;
+const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Round {
     pub jobs: Vec<Queued>,

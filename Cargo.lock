@@ -72,7 +72,6 @@ name = "appview"
 version = "0.1.0"
 dependencies = [
  "futures-util",
- "jiff",
  "metrics",
  "reqwest",
  "serde",
@@ -2889,7 +2888,6 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "fjall",
- "jiff",
  "postcard",
  "serde",
  "tempfile",

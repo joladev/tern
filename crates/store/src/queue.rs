@@ -1,14 +1,12 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fjall::Keyspace;
-use serde::Deserialize;
 use types::Job;
 
 use crate::{BackfillProgress, Error, Store};
 
 const JETSTREAM_POSITION: &str = "position:jetstream";
-const BACKFILL_POSITION: &str = "position:backfill";
-const BACKFILL_STATE_BEFORE_QUEUE: &str = "backfill";
+pub(crate) const BACKFILL_POSITION: &str = "position:backfill";
 const KEY_LEN: usize = 9;
 
 type Key = [u8; KEY_LEN];
@@ -47,15 +45,6 @@ pub enum Position {
 pub struct Queued {
     key: Key,
     pub job: Job,
-}
-
-// TODO JOHANNA: older versions saved backfill progress in this format.
-// Production finished its backfill under that version. We still read it so
-// backfill does not run again after upgrading. The old value has two
-// counters after the progress, which we ignore.
-#[derive(Deserialize)]
-struct BackfillStateBeforeQueue {
-    progress: BackfillProgress,
 }
 
 #[derive(Default)]
@@ -154,14 +143,10 @@ impl Store {
     }
 
     pub fn backfill_position(&self) -> Result<BackfillProgress, Error> {
-        if let Some(bytes) = self.meta.get(BACKFILL_POSITION)? {
-            return Ok(postcard::from_bytes(&bytes)?);
-        }
-        let Some(bytes) = self.meta.get(BACKFILL_STATE_BEFORE_QUEUE)? else {
+        let Some(bytes) = self.meta.get(BACKFILL_POSITION)? else {
             return Ok(BackfillProgress::default());
         };
-        let state: BackfillStateBeforeQueue = postcard::from_bytes(&bytes)?;
-        Ok(state.progress)
+        Ok(postcard::from_bytes(&bytes)?)
     }
 
     fn next_key(&self, lane: Lane) -> Key {
@@ -283,23 +268,6 @@ mod tests {
         assert_eq!(store.backfill_position().unwrap(), progress);
         let jobs = store.next_jobs(10).unwrap();
         assert_eq!(names(&jobs), ["did:plc:a", "did:plc:b"]);
-    }
-
-    #[test]
-    fn a_backfill_finished_before_the_queue_existed_stays_finished() {
-        let (_dir, store) = open();
-        let progress = BackfillProgress {
-            cursor: None,
-            finished: true,
-        };
-        let counts = (10_u64, 4_u64);
-        let bytes = postcard::to_stdvec(&(progress, counts)).unwrap();
-        store
-            .meta
-            .insert(BACKFILL_STATE_BEFORE_QUEUE, bytes)
-            .unwrap();
-
-        assert!(store.backfill_position().unwrap().finished);
     }
 
     #[test]

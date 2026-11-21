@@ -4,21 +4,13 @@ const SECONDS_PER_DAY: i64 = 86_400;
 const FOLLOWER_WEIGHT: f64 = 100.0;
 const AGE_WEIGHT: f64 = 10.0;
 
-pub trait Scorer: Send {
-    fn score(&self, enrichment: &Enrichment, now: i64) -> u64;
-}
-
-pub struct Reach;
-
-impl Scorer for Reach {
-    fn score(&self, enrichment: &Enrichment, now: i64) -> u64 {
-        let followers = (1.0 + enrichment.followers as f64).log2();
-        let age_days = enrichment.created_at.as_ref().map_or(0, |created_at| {
-            (now - created_at.timestamp().as_second()) / SECONDS_PER_DAY
-        });
-        let age = (1.0 + age_days.max(0) as f64).log2();
-        (followers * FOLLOWER_WEIGHT + age * AGE_WEIGHT) as u64
-    }
+pub fn reach(enrichment: &Enrichment, now: i64) -> u64 {
+    let followers = (1.0 + enrichment.followers as f64).log2();
+    let age_days = enrichment.created_at.as_ref().map_or(0, |created_at| {
+        (now - created_at.timestamp().as_second()) / SECONDS_PER_DAY
+    });
+    let age = (1.0 + age_days.max(0) as f64).log2();
+    (followers * FOLLOWER_WEIGHT + age * AGE_WEIGHT) as u64
 }
 
 #[cfg(test)]
@@ -35,7 +27,7 @@ mod tests {
             followers,
             created_at: Some(Datetime::try_from(created_at.to_string()).unwrap()),
         };
-        Reach.score(&enrichment, NOW)
+        reach(&enrichment, NOW)
     }
 
     #[test]

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::block_in_place;
 use types::{Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, Status};
 
-use crate::score::Scorer;
+use crate::score;
 
 const REBUILD_CHUNK: usize = 1000;
 const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
@@ -21,7 +21,6 @@ pub struct Round {
 pub struct Writer {
     store: Arc<Store>,
     index: search::Writer,
-    scorer: Box<dyn Scorer>,
     has_changes: bool,
     rebuild: Option<Rebuild>,
     finished: Vec<Queued>,
@@ -32,11 +31,10 @@ struct Rebuild {
 }
 
 impl Writer {
-    pub fn new(store: Arc<Store>, index: search::Writer, scorer: Box<dyn Scorer>) -> Writer {
+    pub fn new(store: Arc<Store>, index: search::Writer) -> Writer {
         Writer {
             store,
             index,
-            scorer,
             has_changes: false,
             rebuild: None,
             finished: Vec::new(),
@@ -219,7 +217,7 @@ impl Writer {
             created_at: enrichment.created_at.clone(),
             verification: account.current_verification().cloned(),
         };
-        Some((actor, self.scorer.score(enrichment, now)))
+        Some((actor, score::reach(enrichment, now)))
     }
 
     fn record_index(&self) {
@@ -254,7 +252,6 @@ mod tests {
     use types::{AppviewVerification, Datetime, Handle, Job, Profile, VerificationState};
 
     use super::*;
-    use crate::score::Reach;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -267,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("store")).unwrap());
         let (reader, index) = search::open_in_memory().unwrap();
-        let writer = Writer::new(Arc::clone(&store), index, Box::new(Reach));
+        let writer = Writer::new(Arc::clone(&store), index);
         Fixture {
             _dir: dir,
             store,

@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use refresh::Refresh;
-use score::Reach;
 use sources::Source;
 use sources::appview::Appview;
 use sources::slingshot::{SlingshotIdentity, SlingshotProfile};
@@ -182,7 +181,7 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         enabled: args.backfill,
     };
     let (writer_queue, inbox) = mpsc::channel(WRITER_QUEUE_SIZE);
-    let writer = Writer::new(Arc::clone(&store), index, Box::new(Reach));
+    let writer = Writer::new(Arc::clone(&store), index);
     let jetstream = Jetstream {
         subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
         store: Arc::clone(&store),
@@ -247,7 +246,7 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
 fn rebuild(data_dir: &Path) -> anyhow::Result<()> {
     let store = open_store(data_dir)?;
     let (_reader, index) = open_index(data_dir)?;
-    Writer::new(store, index, Box::new(Reach)).rebuild()
+    Writer::new(store, index).rebuild()
 }
 
 async fn health(bind: SocketAddr) -> anyhow::Result<()> {

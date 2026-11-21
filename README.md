@@ -33,7 +33,9 @@ Example response
       "did": "did:plc:j67yqsbcjczp73i3b73ei2kj",
       "handle": "hayleigh.dev",
       "displayName": "hayleigh",
-      "avatar": "https://cdn.bsky.app/img/avatar/plain/did:plc:j67yqsbcjczp73i3b73ei2kj/bafkreidm57rmcqtl3djyijs57u7wlfdvxojclj2zgogur6fdmelaqwayfe"
+      "avatar": "https://cdn.bsky.app/img/avatar/plain/did:plc:j67yqsbcjczp73i3b73ei2kj/bafkreighzctmijy5hm5f7o6ghauu6cko5bbjzs75vm24islnz2qm7cwfnu",
+      "labels": [],
+      "createdAt": "2023-04-25T13:42:13.109Z"
     }
   ]
 }

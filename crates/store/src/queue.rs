@@ -6,7 +6,7 @@ use types::Job;
 use crate::{BackfillProgress, Error, Store};
 
 const JETSTREAM_POSITION: &str = "position:jetstream";
-pub(crate) const BACKFILL_POSITION: &str = "position:backfill";
+const BACKFILL_POSITION: &str = "position:backfill";
 const KEY_LEN: usize = 9;
 
 type Key = [u8; KEY_LEN];

@@ -251,7 +251,7 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use store::Lane;
-    use types::{AppviewVerification, Handle, Job, Profile, VerificationState};
+    use types::{AppviewVerification, Datetime, Handle, Job, Profile, VerificationState};
 
     use super::*;
     use crate::score::Reach;
@@ -512,9 +512,10 @@ mod tests {
     fn a_refresh_rescores_an_account_that_only_got_older() {
         let mut fixture = fixture();
         let created = now() - 400 * 86_400;
+        let created_at = jiff::Timestamp::from_second(created).unwrap();
         let enrichment = Enrichment {
             followers: 0,
-            created_at: Some(jiff::Timestamp::from_second(created).unwrap().to_string()),
+            created_at: Some(Datetime::try_from(created_at.to_string()).unwrap()),
         };
         let aged = Facts {
             enrichment: Some(enrichment.clone()),
@@ -551,7 +552,7 @@ mod tests {
             uri: "did:plc:a".to_owned(),
             cid: None,
             val: "spam".to_owned(),
-            cts: "2026-01-01T00:00:00Z".to_owned(),
+            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
             exp: None,
         };
         let labelled = Facts {

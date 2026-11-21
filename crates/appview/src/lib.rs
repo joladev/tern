@@ -1,7 +1,8 @@
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
 use types::{
-    AppviewVerification, Did, Enrichment, Handle, Label, Profile, Verification, VerificationState,
+    AppviewVerification, Datetime, Did, Enrichment, Handle, Label, Profile, Verification,
+    VerificationState,
 };
 
 const GET_PROFILES_PATH: &str = "/xrpc/app.bsky.actor.getProfiles";
@@ -89,14 +90,13 @@ struct RawVerification {
 
 impl RawVerification {
     fn into_verification(self) -> Option<Verification> {
-        types::parse_datetime(&self.created_at)?;
         Some(Verification {
             issuer: Did::try_from(self.issuer).ok()?,
             issuer_display_name: self.issuer_display_name,
             issuer_handle: self.issuer_handle,
             uri: self.uri,
             is_valid: self.is_valid,
-            created_at: self.created_at,
+            created_at: Datetime::try_from(self.created_at).ok()?,
         })
     }
 }
@@ -113,15 +113,14 @@ struct RawLabel {
 
 impl RawLabel {
     fn into_label(self) -> Option<Label> {
-        let label = Label {
+        Some(Label {
             src: Did::try_from(self.src).ok()?,
             uri: self.uri,
             cid: self.cid,
             val: self.val,
-            cts: self.cts,
-            exp: self.exp,
-        };
-        label.has_valid_times().then_some(label)
+            cts: Datetime::try_from(self.cts).ok()?,
+            exp: self.exp.map(Datetime::try_from).transpose().ok()?,
+        })
     }
 }
 
@@ -135,7 +134,7 @@ impl From<RawProfile> for ProfileView {
             followers: count(raw.followers_count),
             created_at: raw
                 .created_at
-                .filter(|time| types::parse_datetime(time).is_some()),
+                .and_then(|time| Datetime::try_from(time).ok()),
         };
         let handle = Handle::try_from(raw.handle).ok();
         let labels = raw
@@ -240,7 +239,7 @@ mod tests {
             uri: "at://did:plc:x/app.bsky.actor.profile/self".to_owned(),
             cid: Some("bafyrei".to_owned()),
             val: "porn".to_owned(),
-            cts: "2026-03-09T14:53:09.930Z".to_owned(),
+            cts: Datetime::try_from("2026-03-09T14:53:09.930Z".to_owned()).unwrap(),
             exp: None,
         };
         assert_eq!(view.labels, [label]);
@@ -274,7 +273,7 @@ mod tests {
             issuer_handle: Some("bsky.app".to_owned()),
             uri: "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.graph.verification/3l".to_owned(),
             is_valid: true,
-            created_at: "2025-07-20T22:36:31.691Z".to_owned(),
+            created_at: Datetime::try_from("2025-07-20T22:36:31.691Z".to_owned()).unwrap(),
         };
         let expected = AppviewVerification {
             handle: Handle::try_from("x.test".to_owned()).ok(),

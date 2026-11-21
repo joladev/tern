@@ -75,12 +75,48 @@ impl fmt::Display for Handle {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Datetime {
+    text: String,
+    timestamp: jiff::Timestamp,
+}
+
+impl Datetime {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn timestamp(&self) -> jiff::Timestamp {
+        self.timestamp
+    }
+}
+
+impl TryFrom<String> for Datetime {
+    type Error = ParseError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        match text.parse() {
+            Ok(timestamp) => Ok(Datetime { text, timestamp }),
+            Err(_) => Err(ParseError::Datetime(text)),
+        }
+    }
+}
+
+impl From<Datetime> for String {
+    fn from(datetime: Datetime) -> String {
+        datetime.text
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("invalid DID `{0}`")]
     Did(String),
     #[error("invalid handle `{0}`")]
     Handle(String),
+    #[error("invalid date and time `{0}`")]
+    Datetime(String),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -151,7 +187,7 @@ pub struct Verification {
     pub issuer_handle: Option<String>,
     pub uri: String,
     pub is_valid: bool,
-    pub created_at: String,
+    pub created_at: Datetime,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -210,24 +246,14 @@ pub struct Label {
     pub uri: String,
     pub cid: Option<String>,
     pub val: String,
-    pub cts: String,
-    pub exp: Option<String>,
-}
-
-impl Label {
-    pub fn has_valid_times(&self) -> bool {
-        parse_datetime(&self.cts).is_some()
-            && self
-                .exp
-                .as_deref()
-                .is_none_or(|exp| parse_datetime(exp).is_some())
-    }
+    pub cts: Datetime,
+    pub exp: Option<Datetime>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Enrichment {
     pub followers: u64,
-    pub created_at: Option<String>,
+    pub created_at: Option<Datetime>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -276,10 +302,6 @@ pub struct Job {
 pub struct Fetched {
     pub facts: HashMap<Did, Facts>,
     pub failed: Vec<Did>,
-}
-
-pub fn parse_datetime(value: &str) -> Option<jiff::Timestamp> {
-    value.parse().ok()
 }
 
 #[cfg(test)]

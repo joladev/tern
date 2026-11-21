@@ -168,7 +168,7 @@ impl Writer {
             document.add_text(fields.labels, labels);
         }
         if let Some(created_at) = &actor.created_at {
-            document.add_text(fields.created_at, created_at);
+            document.add_text(fields.created_at, created_at.as_str());
         }
         if let Some(verification) = &actor.verification {
             let verification =
@@ -375,7 +375,7 @@ fn pre_tokenized(terms: Vec<String>) -> PreTokenizedString {
 #[cfg(test)]
 mod tests {
     use tantivy::schema::Schema;
-    use types::{Handle, Label};
+    use types::{Datetime, Handle, Label};
 
     use super::*;
 
@@ -428,7 +428,7 @@ mod tests {
             uri: "did:plc:alice".to_owned(),
             cid: None,
             val: "spam".to_owned(),
-            cts: "2026-01-01T00:00:00Z".to_owned(),
+            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
             exp: None,
         };
         writer.start_rebuild().unwrap();

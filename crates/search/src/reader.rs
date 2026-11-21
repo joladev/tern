@@ -9,7 +9,7 @@ use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::{
     DocAddress, DocId, DocSet, IndexReader, Searcher, TERMINATED, TantivyDocument, Term,
 };
-use types::{Did, Handle};
+use types::{Datetime, Did, Handle};
 
 use crate::schema::{Fields, SCORE_FIELD};
 use crate::terms::{self, Kind};
@@ -214,6 +214,10 @@ impl Reader {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|_| Error::BadDocument("verification"))?;
+        let created_at = text(self.fields.created_at)
+            .map(|created_at| Datetime::try_from(created_at.to_owned()))
+            .transpose()
+            .map_err(|_| Error::BadDocument("created_at"))?;
 
         Ok(Actor {
             did,
@@ -221,7 +225,7 @@ impl Reader {
             display_name: text(self.fields.display_name).map(str::to_owned),
             avatar_cid: text(self.fields.avatar_cid).map(str::to_owned),
             labels,
-            created_at: text(self.fields.created_at).map(str::to_owned),
+            created_at,
             verification,
         })
     }

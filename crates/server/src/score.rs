@@ -13,10 +13,8 @@ pub struct Reach;
 impl Scorer for Reach {
     fn score(&self, enrichment: &Enrichment, now: i64) -> u64 {
         let followers = (1.0 + enrichment.followers as f64).log2();
-        let age_days = enrichment.created_at.as_deref().map_or(0, |created_at| {
-            let created_at = types::parse_datetime(created_at)
-                .expect("creation times are checked when they are read");
-            (now - created_at.as_second()) / SECONDS_PER_DAY
+        let age_days = enrichment.created_at.as_ref().map_or(0, |created_at| {
+            (now - created_at.timestamp().as_second()) / SECONDS_PER_DAY
         });
         let age = (1.0 + age_days.max(0) as f64).log2();
         (followers * FOLLOWER_WEIGHT + age * AGE_WEIGHT) as u64
@@ -25,18 +23,17 @@ impl Scorer for Reach {
 
 #[cfg(test)]
 mod tests {
+    use types::Datetime;
+
     use super::*;
 
     const NOW: i64 = 1_800_000_000;
 
     fn score(followers: u64, age_days: i64) -> u64 {
+        let created_at = jiff::Timestamp::from_second(NOW - age_days * SECONDS_PER_DAY).unwrap();
         let enrichment = Enrichment {
             followers,
-            created_at: Some(
-                jiff::Timestamp::from_second(NOW - age_days * SECONDS_PER_DAY)
-                    .unwrap()
-                    .to_string(),
-            ),
+            created_at: Some(Datetime::try_from(created_at.to_string()).unwrap()),
         };
         Reach.score(&enrichment, NOW)
     }

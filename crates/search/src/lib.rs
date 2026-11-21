@@ -6,7 +6,7 @@ mod writer;
 
 use std::path::Path;
 
-use types::{Did, Handle, Label, VerificationState};
+use types::{Datetime, Did, Handle, Label, VerificationState};
 
 pub use reader::Reader;
 pub use writer::Writer;
@@ -38,7 +38,7 @@ pub struct Actor {
     pub display_name: Option<String>,
     pub avatar_cid: Option<String>,
     pub labels: Vec<Label>,
-    pub created_at: Option<String>,
+    pub created_at: Option<Datetime>,
     pub verification: Option<VerificationState>,
 }
 

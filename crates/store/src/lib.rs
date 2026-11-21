@@ -323,7 +323,7 @@ fn did_from_bytes(bytes: &[u8]) -> Result<Did, Error> {
 
 #[cfg(test)]
 mod tests {
-    use types::Handle;
+    use types::{Datetime, Handle};
 
     use super::*;
 
@@ -388,7 +388,7 @@ mod tests {
             uri: "did:plc:alice".to_owned(),
             cid: None,
             val: val.to_owned(),
-            cts: "2026-01-01T00:00:00Z".to_owned(),
+            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
             exp: None,
         }
     }

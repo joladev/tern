@@ -11,7 +11,7 @@ use jiff::Timestamp;
 use search::{Actor, Reader};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
-use types::{Did, Handle, Label, Verification, VerificationState};
+use types::{Datetime, Did, Handle, Label, Verification, VerificationState};
 
 use crate::telemetry::Exporter;
 
@@ -70,7 +70,7 @@ struct ActorView {
     avatar: Option<String>,
     labels: Vec<LabelView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
+    created_at: Option<Datetime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification: Option<VerificationStateView>,
 }
@@ -105,9 +105,9 @@ struct LabelView {
     #[serde(skip_serializing_if = "Option::is_none")]
     cid: Option<String>,
     val: String,
-    cts: String,
+    cts: Datetime,
     #[serde(skip_serializing_if = "Option::is_none")]
-    exp: Option<String>,
+    exp: Option<Datetime>,
 }
 
 impl From<Label> for LabelView {
@@ -155,7 +155,7 @@ struct VerificationView {
     issuer_handle: Option<String>,
     uri: String,
     is_valid: bool,
-    created_at: String,
+    created_at: Datetime,
 }
 
 impl From<Verification> for VerificationView {
@@ -172,9 +172,7 @@ impl From<Verification> for VerificationView {
 }
 
 fn has_expired(label: &Label, now: Timestamp) -> bool {
-    label.exp.as_deref().is_some_and(|exp| {
-        types::parse_datetime(exp).expect("label times are checked when they are read") <= now
-    })
+    label.exp.as_ref().is_some_and(|exp| exp.timestamp() <= now)
 }
 
 async fn typeahead(
@@ -272,8 +270,8 @@ mod tests {
             uri: "did:plc:alice".to_owned(),
             cid: None,
             val: "spam".to_owned(),
-            cts: "2026-01-01T00:00:00Z".to_owned(),
-            exp: exp.map(str::to_owned),
+            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
+            exp: exp.map(|exp| Datetime::try_from(exp.to_owned()).unwrap()),
         }
     }
 

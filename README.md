@@ -43,9 +43,20 @@ Example response
 
 There's also an `app.bsky.actor.searchActorsTypeahead` alias.
 
-### Diagram
+## Design
 
-tern discovers new accounts and account changes through jetstream or backfill. The jetstream events just have dids, so tern uses Slingshot to find the handle. This means search should reflect handle changes within seconds. New accounts discovered on the jetstream, or through backfill, are scheduled for enrichment, aka fetching data for scoring. Currently this uses the Bluesky appview and relies on things like account age and follower counts. You can override the appview. A future version may also utilize constellation to count backlinks as a secondary metric for accounts that don't use Bluesky.
+I'll try to note down some of the design decisions here.
+
+* Use multiple data sources to reduce reliance on Bluesky.
+* Extensibility in regards to additional data sources.
+* Run with relatively few resources.
+* Readability is important.
+
+The core concept in tern is an identity. An identity is represented by a did, and may have information such as a `createdAt` timestamp and a handle. tern is designed to use multiple sources for account information. A simpler implementation would be to just use the Bluesky AppView, but tern aims to function even if Bluesky were to go away, and so most data has a redundant source to fall back on. Each identity is kept in the fjall data store, together with any related account information that has been fetched, and a timestamp for when it was last refreshed.
+
+tern is built to be extensible with additional data sources. The data processing pipeline, described below, takes inputs from multiple sources and schedules them all in a job queue with two priority lanes: a slow one for the weekly refresh, and a fast one for changes discovered through the jetstream. The reason for the split is that a user who changes their account handle should see it reflected in the service immediately, while a change in follower count overall will only have a minimal impact on scoring and can wait.
+
+All data flows through the same processing pipeline, with each identity being inserted into the job queue for processing. The refresh worker takes batches of identities and fetches data from the available data sources. There is overlap in the data, so it's merged with some basic rules. As an example, an account that is missing in the Bluesky AppView, but resolved through Slingshot, is recorded.
 
 ```text
 Jetstream ──────┐
@@ -57,14 +68,28 @@ stale scan ─────┘              (in fjall)       │                 
                                                    └──> Tantivy ──> HTTP API
 ```
 
-An account is considered stale after a week and scheduled for refresh, which captures changes in follower counts.
+Every update to an identity also triggers a reindexing, so the updated data is surfaced within seconds. The scoring algorithm uses account age and followers, with a bonus for prefix matches, and an exact handle match always wins.
+
+```text
+rank = 100 · log2(1 + followers) + 10 · log2(1 + age in days) + bonus
+
+bonus = 650   if the first part of the handle equals the query
+        150   if the handle starts with the query
+        0     otherwise
+```
+
+## Independence from Bluesky
+
+Bluesky provides great infrastructure and is the easiest to use source of data for a service like tern, but it is ultimately designed for the needs of Bluesky. One way in which this plays out is that an account banned by Bluesky, but that lives on an independent PDS, stops being returned by the Bluesky AppView. Relying on that data would be at odds with the goals of the decentralized protocol. A Bluesky ban should not be a global ban for that account.
+
+Instead tern treats Bluesky's labels as just that, labels, and resolves identities and profiles through Slingshot, fetching the data directly from the user's PDS. tern returns the accounts and the labels, and it is up to each client to decide which labelers and labels to apply, and whether to hide any accounts.
 
 ## Development
 
 Relevant commands:
 
 * `just test`
-* `just test-integration`
+* `just integration`
 * `just lint`
 * `just dev`
 
@@ -72,9 +97,10 @@ Relevant commands:
 
 - [x] Surface labels
 - [x] Filter bad words
+- [ ] Offer a getProfile endpoint
 - [ ] Subscribe to labelers
-- [ ] Retries with full jitter exponential backoff
 - [ ] Record reason why an account is inactive
+- [ ] Retries with full jitter exponential backoff
 - [ ] Paginating hubble as an alternative to looking for stale accounts
 - [ ] Constellation backlinks as a fallback for counting followers
 

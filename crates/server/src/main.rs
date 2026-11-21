@@ -28,7 +28,7 @@ use telemetry::Exporter;
 use triggers::backfill::Backfill;
 use triggers::jetstream::Jetstream;
 use triggers::stale::Stale;
-use writer::{Message, Writer};
+use writer::Writer;
 
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -156,9 +156,6 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("failed to create the HTTP client")?;
-    let (writer_queue, inbox) = mpsc::channel(WRITER_QUEUE_SIZE);
-    let writer = Writer::new(Arc::clone(&store), index, Box::new(Reach));
-    let writer_task = tokio::task::spawn_blocking(move || writer.run(inbox));
 
     let slingshot = slingshot::Client::new(http_client.clone(), args.slingshot_url);
     let appview = appview::Client::new(http_client.clone(), args.appview_url);
@@ -177,10 +174,13 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
             concurrency: args.appview_concurrency as usize,
         }),
     ];
+
+    let (writer_queue, inbox) = mpsc::channel(WRITER_QUEUE_SIZE);
+    let writer = Writer::new(Arc::clone(&store), index, Box::new(Reach));
     let refresh = Refresh {
         store: Arc::clone(&store),
         sources,
-        writer: writer_queue.clone(),
+        writer: writer_queue,
     };
     let jetstream = Jetstream {
         subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
@@ -223,9 +223,10 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         store: Arc::clone(&store),
         stale_after: args.refresh_after,
     };
+
+    spawn_until_drained(&mut tasks, &cancel, writer.run(inbox));
     spawn_until_cancelled(&mut tasks, &cancel, stale.run());
     spawn_until_cancelled(&mut tasks, &cancel, refresh.run());
-    spawn_until_cancelled(&mut tasks, &cancel, tick(writer_queue));
     spawn_until_cancelled(&mut tasks, &cancel, async move {
         server.await.context("the HTTP server failed")
     });
@@ -245,7 +246,6 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
             first_error.get_or_insert(err);
         }
     }
-    writer_task.await.context("the writer panicked")??;
 
     first_error.map_or(Ok(()), Err)
 }
@@ -314,15 +314,16 @@ fn spawn_finite(
     });
 }
 
-async fn tick(writer: mpsc::Sender<Message>) -> anyhow::Result<()> {
-    let mut interval = tokio::time::interval(COMMIT_INTERVAL);
-    loop {
-        interval.tick().await;
-        writer
-            .send(Message::Commit)
-            .await
-            .context("the writer stopped")?;
-    }
+fn spawn_until_drained(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
+    cancel: &CancellationToken,
+    task: impl Future<Output = anyhow::Result<()>> + Send + 'static,
+) {
+    let cancel = cancel.clone();
+    tasks.spawn(async move {
+        let _stop_others = cancel.drop_guard();
+        task.await
+    });
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {

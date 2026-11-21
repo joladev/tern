@@ -4,19 +4,13 @@ use std::time::Instant;
 use anyhow::Context as _;
 use search::Actor;
 use store::{LabelOrigin, Queued, Store};
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc;
+use tokio::task::block_in_place;
 use types::{Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, Status};
 
-use crate::score::Scorer;
+use crate::{COMMIT_INTERVAL, score::Scorer};
 
 const REBUILD_CHUNK: usize = 1000;
-
-const MESSAGES_PER_STEP: usize = 100;
-
-pub enum Message {
-    Round(Round),
-    Commit,
-}
 
 pub struct Round {
     pub jobs: Vec<Queued>,
@@ -48,21 +42,24 @@ impl Writer {
         }
     }
 
-    pub fn run(mut self, mut inbox: mpsc::Receiver<Message>) -> anyhow::Result<()> {
+    pub async fn run(mut self, mut inbox: mpsc::Receiver<Round>) -> anyhow::Result<()> {
         if self.index.needs_rebuild() {
             self.start_rebuild()?;
         }
-        while self.rebuild.is_some() {
-            let inbox_open = self.apply_queued(&mut inbox)?;
-            if !inbox_open {
-                return self.commit();
+        let mut commit = tokio::time::interval(COMMIT_INTERVAL);
+        loop {
+            tokio::select! {
+                round = inbox.recv() => match round {
+                    Some(round) => block_in_place(|| self.apply_round(round))?,
+                    None => break,
+                },
+                _ = commit.tick() => block_in_place(|| self.commit())?,
+                () = std::future::ready(()), if self.rebuild.is_some() => {
+                    block_in_place(|| self.rebuild_step())?;
+                }
             }
-            self.rebuild_step()?;
         }
-        while let Some(message) = inbox.blocking_recv() {
-            self.apply(message)?;
-        }
-        self.commit()
+        block_in_place(|| self.commit())
     }
 
     pub fn rebuild(mut self) -> anyhow::Result<()> {
@@ -71,17 +68,6 @@ impl Writer {
             self.rebuild_step()?;
         }
         Ok(())
-    }
-
-    fn apply_queued(&mut self, inbox: &mut mpsc::Receiver<Message>) -> anyhow::Result<bool> {
-        for _ in 0..MESSAGES_PER_STEP {
-            match inbox.try_recv() {
-                Ok(message) => self.apply(message)?,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return Ok(false),
-            }
-        }
-        Ok(true)
     }
 
     fn start_rebuild(&mut self) -> anyhow::Result<()> {
@@ -128,14 +114,6 @@ impl Writer {
         metrics::gauge!("tern_index_rebuilding").set(0.0);
         self.record_index();
         tracing::info!("index rebuild finished");
-        Ok(())
-    }
-
-    fn apply(&mut self, message: Message) -> anyhow::Result<()> {
-        match message {
-            Message::Round(round) => self.apply_round(round)?,
-            Message::Commit => self.commit()?,
-        }
         Ok(())
     }
 
@@ -365,8 +343,8 @@ mod tests {
                 jobs: self.store.next_jobs(10).unwrap(),
                 fetched,
             };
-            self.writer.apply(Message::Round(round)).unwrap();
-            self.writer.apply(Message::Commit).unwrap();
+            self.writer.apply_round(round).unwrap();
+            self.writer.commit().unwrap();
         }
 
         fn refreshed_at(&self, name: &str) -> i64 {
@@ -527,19 +505,6 @@ mod tests {
         assert!(fixture.writer.rebuild.is_none());
         assert!(fixture.found("ali").is_empty());
         assert_eq!(fixture.found("bob"), ["bob.test"]);
-    }
-
-    #[test]
-    fn a_full_queue_does_not_stall_a_rebuild() {
-        let mut fixture = fixture();
-        let (sender, mut inbox) = mpsc::channel(MESSAGES_PER_STEP + 1);
-        for _ in 0..=MESSAGES_PER_STEP {
-            sender.try_send(Message::Commit).unwrap();
-        }
-
-        assert!(fixture.writer.apply_queued(&mut inbox).unwrap());
-
-        assert_eq!(inbox.len(), 1);
     }
 
     #[test]

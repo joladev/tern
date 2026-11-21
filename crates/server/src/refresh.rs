@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use types::{Did, Fetched};
 
 use crate::sources::Source;
-use crate::writer::{Message, Round};
+use crate::writer::Round;
 
 const ROUND_SIZE: usize = 200;
 const IDLE_PAUSE: Duration = Duration::from_millis(100);
@@ -17,7 +17,7 @@ const IDLE_PAUSE: Duration = Duration::from_millis(100);
 pub struct Refresh {
     pub store: Arc<Store>,
     pub sources: Vec<Box<dyn Source>>,
-    pub writer: mpsc::Sender<Message>,
+    pub writer: mpsc::Sender<Round>,
 }
 
 impl Refresh {
@@ -31,7 +31,7 @@ impl Refresh {
             }
 
             let round = self.round(jobs).await;
-            let sent = self.writer.send(Message::Round(round)).await;
+            let sent = self.writer.send(round).await;
             sent.context("the writer stopped")?;
         }
     }

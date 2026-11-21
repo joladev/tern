@@ -15,7 +15,7 @@ axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 fjall = "3"
 futures-util = "0.3"
-jiff = "0.2"
+jiff = "1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2"

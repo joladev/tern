@@ -1,12 +1,13 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fjall::Keyspace;
-use types::Job;
+use types::{Did, Job};
 
 use crate::{BackfillProgress, Error, Store};
 
 const JETSTREAM_POSITION: &str = "position:jetstream";
 const BACKFILL_POSITION: &str = "position:backfill";
+const STALE_POSITION: &str = "position:stale";
 const KEY_LEN: usize = 9;
 
 type Key = [u8; KEY_LEN];
@@ -39,6 +40,7 @@ impl Lane {
 pub enum Position {
     Jetstream(u64),
     Backfill(BackfillProgress),
+    Stale(Option<Did>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -88,6 +90,10 @@ impl Store {
             Some(Position::Backfill(progress)) => {
                 let value = postcard::to_stdvec(&progress)?;
                 batch.insert(&self.meta, BACKFILL_POSITION, value);
+            }
+            Some(Position::Stale(after)) => {
+                let value = postcard::to_stdvec(&after)?;
+                batch.insert(&self.meta, STALE_POSITION, value);
             }
             None => {}
         }
@@ -145,6 +151,13 @@ impl Store {
     pub fn backfill_position(&self) -> Result<BackfillProgress, Error> {
         let Some(bytes) = self.meta.get(BACKFILL_POSITION)? else {
             return Ok(BackfillProgress::default());
+        };
+        Ok(postcard::from_bytes(&bytes)?)
+    }
+
+    pub fn stale_position(&self) -> Result<Option<Did>, Error> {
+        let Some(bytes) = self.meta.get(STALE_POSITION)? else {
+            return Ok(None);
         };
         Ok(postcard::from_bytes(&bytes)?)
     }
@@ -249,6 +262,7 @@ mod tests {
             cursor: Some("next".to_owned()),
             finished: false,
         };
+        let scanned = job("c").did;
 
         store
             .enqueue(Lane::Live, vec![job("a")], Some(Position::Jetstream(7)))
@@ -260,12 +274,16 @@ mod tests {
                 Some(Position::Backfill(progress.clone())),
             )
             .unwrap();
+        let position = Position::Stale(Some(scanned.clone()));
+        store
+            .enqueue(Lane::Background, Vec::new(), Some(position))
+            .unwrap();
         store.persist().unwrap();
         drop(store);
         let store = Store::open(dir.path()).unwrap();
 
         assert_eq!(store.jetstream_position().unwrap(), Some(7));
-        assert_eq!(store.backfill_position().unwrap(), progress);
+        assert_eq!(store.stale_position().unwrap(), Some(scanned));
         let jobs = store.next_jobs(10).unwrap();
         assert_eq!(names(&jobs), ["did:plc:a", "did:plc:b"]);
     }

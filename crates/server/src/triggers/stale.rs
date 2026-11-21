@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use jiff::{SignedDuration, Timestamp};
-use store::{Lane, Store};
+use store::{Lane, Position, Store};
 use tokio::time::sleep;
 use types::{Facts, Job};
 
@@ -19,7 +19,7 @@ pub struct Stale {
 
 impl Stale {
     pub async fn run(self) -> anyhow::Result<()> {
-        let mut after = None;
+        let mut after = self.store.stale_position()?;
         loop {
             room_in_the_background_lane(&self.store).await;
             let cutoff = (Timestamp::now() - self.stale_after).as_second();
@@ -35,7 +35,9 @@ impl Stale {
                 did,
                 seen: Facts::default(),
             });
-            self.store.enqueue(Lane::Background, jobs.collect(), None)?;
+            let position = Position::Stale(after.clone());
+            self.store
+                .enqueue(Lane::Background, jobs.collect(), Some(position))?;
             sleep(SCAN_PAUSE).await;
         }
     }

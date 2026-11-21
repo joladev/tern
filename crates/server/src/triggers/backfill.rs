@@ -13,12 +13,14 @@ const MAX_FAILURE_DELAY: Duration = Duration::from_secs(300);
 pub struct Backfill {
     pub hubble: hubble::Client,
     pub store: Arc<Store>,
+    pub enabled: bool,
 }
 
 impl Backfill {
     pub async fn run(self) -> anyhow::Result<()> {
         let progress = self.store.backfill_position()?;
-        if progress.finished {
+        metrics::gauge!("tern_backfill_finished").set(f64::from(u8::from(progress.finished)));
+        if progress.finished || !self.enabled {
             return Ok(());
         }
         match self.hubble.active_total().await {

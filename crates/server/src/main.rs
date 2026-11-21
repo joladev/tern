@@ -176,16 +176,25 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         }),
     ];
 
+    let backfill = Backfill {
+        hubble: hubble::Client::new(http_client, args.hubble_url),
+        store: Arc::clone(&store),
+        enabled: args.backfill,
+    };
     let (writer_queue, inbox) = mpsc::channel(WRITER_QUEUE_SIZE);
     let writer = Writer::new(Arc::clone(&store), index, Box::new(Reach));
+    let jetstream = Jetstream {
+        subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
+        store: Arc::clone(&store),
+    };
+    let stale = Stale {
+        store: Arc::clone(&store),
+        stale_after: args.refresh_after,
+    };
     let refresh = Refresh {
         store: Arc::clone(&store),
         sources,
         writer: writer_queue,
-    };
-    let jetstream = Jetstream {
-        subscription: jetstream::subscribe(args.jetstream_url, cursor, JETSTREAM_QUEUE_SIZE),
-        store: Arc::clone(&store),
     };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
@@ -207,25 +216,9 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
     let server = axum::serve(listener, http::router(reader)).with_graceful_shutdown(shutdown);
 
     let mut tasks = JoinSet::new();
-    spawn_until_cancelled(&mut tasks, &cancel, jetstream.run());
-    let backfill_finished = store
-        .backfill_position()
-        .context("failed to read the backfill position")?
-        .finished;
-    metrics::gauge!("tern_backfill_finished").set(f64::from(u8::from(backfill_finished)));
-    if args.backfill && !backfill_finished {
-        let backfill = Backfill {
-            hubble: hubble::Client::new(http_client, args.hubble_url),
-            store: Arc::clone(&store),
-        };
-        spawn_finite(&mut tasks, &cancel, backfill.run());
-    }
-    let stale = Stale {
-        store: Arc::clone(&store),
-        stale_after: args.refresh_after,
-    };
-
+    spawn_finite(&mut tasks, &cancel, backfill.run());
     spawn_until_drained(&mut tasks, &cancel, writer.run(inbox));
+    spawn_until_cancelled(&mut tasks, &cancel, jetstream.run());
     spawn_until_cancelled(&mut tasks, &cancel, stale.run());
     spawn_until_cancelled(&mut tasks, &cancel, refresh.run());
     spawn_until_cancelled(&mut tasks, &cancel, async move {

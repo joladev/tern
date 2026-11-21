@@ -1,9 +1,6 @@
-use std::time::Instant;
-
-use futures_util::stream::{self, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
-use types::{Did, Facts, Fetched, Handle, HandleFact, Profile, ProfileRecord};
+use types::{Did, Handle, Profile, ProfileRecord};
 
 const RESOLVE_PATH: &str = "/xrpc/com.bad-example.identity.resolveMiniDoc";
 const GET_RECORD_PATH: &str = "/xrpc/com.atproto.repo.getRecord";
@@ -98,75 +95,6 @@ impl Client {
             status => Err(Error::Status(status)),
         }
     }
-
-    pub async fn identities(&self, dids: &[Did], concurrency: usize) -> Fetched {
-        let calls = dids.iter().map(|did| async move {
-            let start = Instant::now();
-            let handle = self.resolve_handle(did).await;
-            metrics::histogram!("tern_handle_lookup_seconds").record(start.elapsed());
-            metrics::counter!("tern_handle_lookups_total", "outcome" => outcome(&handle))
-                .increment(1);
-            (did, handle.map(handle_facts))
-        });
-        gather(calls.collect(), concurrency).await
-    }
-
-    pub async fn profiles(&self, dids: &[Did], concurrency: usize) -> Fetched {
-        let calls = dids.iter().map(|did| async move {
-            let profile = self.profile(did).await;
-            (did, profile.map(profile_facts))
-        });
-        gather(calls.collect(), concurrency).await
-    }
-}
-
-async fn gather<'a, Call>(calls: Vec<Call>, concurrency: usize) -> Fetched
-where
-    Call: Future<Output = (&'a Did, Result<Facts, Error>)>,
-{
-    let mut calls = stream::iter(calls).buffer_unordered(concurrency);
-    let mut fetched = Fetched::default();
-    while let Some((did, result)) = calls.next().await {
-        match result {
-            Ok(facts) => {
-                fetched.facts.insert(did.clone(), facts);
-            }
-            Err(err) => {
-                let error = &err as &dyn std::error::Error;
-                tracing::warn!(%did, error, "Slingshot call failed");
-                fetched.failed.push(did.clone());
-            }
-        }
-    }
-    fetched
-}
-
-fn outcome(result: &Result<Resolution, Error>) -> &'static str {
-    match result {
-        Ok(Resolution::Handle(_)) => "handle",
-        Ok(Resolution::Invalid) => "invalid",
-        Ok(Resolution::Unknown) => "unknown",
-        Err(_) => "error",
-    }
-}
-
-fn handle_facts(resolution: Resolution) -> Facts {
-    let handle = match resolution {
-        Resolution::Handle(handle) => Some(HandleFact::Resolved(handle)),
-        Resolution::Invalid => Some(HandleFact::Invalid),
-        Resolution::Unknown => None,
-    };
-    Facts {
-        handle,
-        ..Facts::default()
-    }
-}
-
-fn profile_facts(profile: Profile) -> Facts {
-    Facts {
-        profile: Some(profile),
-        ..Facts::default()
-    }
 }
 
 fn profile_without_record(failure: &Failure) -> Result<Profile, Error> {
@@ -179,12 +107,6 @@ fn profile_without_record(failure: &Failure) -> Result<Profile, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_invalid_handle_is_reported_as_invalid() {
-        let facts = handle_facts(Resolution::Invalid);
-        assert_eq!(facts.handle, Some(HandleFact::Invalid));
-    }
 
     #[test]
     fn reads_the_profile_from_a_record() {

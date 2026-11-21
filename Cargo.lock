@@ -71,13 +71,10 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "appview"
 version = "0.1.0"
 dependencies = [
- "futures-util",
- "metrics",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
- "tracing",
  "types",
 ]
 
@@ -2842,13 +2839,10 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "slingshot"
 version = "0.1.0"
 dependencies = [
- "futures-util",
- "metrics",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
- "tracing",
  "types",
 ]
 

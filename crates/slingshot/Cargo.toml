@@ -9,12 +9,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-futures-util.workspace = true
-metrics.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 types.workspace = true
 
 [dev-dependencies]

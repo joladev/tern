@@ -23,7 +23,9 @@ use tracing_subscriber::EnvFilter;
 
 use refresh::Refresh;
 use score::Reach;
-use sources::{Appview, SlingshotIdentity, SlingshotProfile, Source};
+use sources::Source;
+use sources::appview::Appview;
+use sources::slingshot::{SlingshotIdentity, SlingshotProfile};
 use telemetry::Exporter;
 use triggers::backfill::Backfill;
 use triggers::jetstream::Jetstream;

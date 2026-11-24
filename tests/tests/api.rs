@@ -73,6 +73,31 @@ fn deleted_accounts_disappear() {
 }
 
 #[test]
+fn a_label_from_the_labeler_shows_until_it_is_withdrawn() {
+    let harness = Harness::connect();
+    harness.create_account("did:plc:labelled", "labelled.test", "Labelled");
+    harness.wait_for_top_result("labelled", "labelled.test");
+
+    harness.label("did:plc:labelled", "spam");
+    harness.wait_for_labels("labelled", &["spam"]);
+    let actor = harness.search("labelled").remove(0);
+    assert_eq!(actor.labels[0].src, "did:plc:mocklabeler");
+
+    harness.withdraw_label("did:plc:labelled", "spam");
+    harness.wait_for_labels("labelled", &[]);
+}
+
+#[test]
+fn a_label_issued_before_its_account_exists_shows_once_the_account_appears() {
+    let harness = Harness::connect();
+
+    harness.label("did:plc:labelledearly", "spam");
+    harness.create_account("did:plc:labelledearly", "labelledearly.test", "Early");
+
+    harness.wait_for_labels("labelledearly", &["spam"]);
+}
+
+#[test]
 fn enrichment_changes_the_ranking() {
     let harness = Harness::connect();
     harness.create_account("did:plc:rank1", "rankfirst.test", "Rank");

@@ -12,6 +12,7 @@ license = "Apache-2.0"
 anyhow = "1"
 arc-swap = "1"
 axum = { version = "0.8", features = ["ws"] }
+ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 fjall = "3"
 futures-util = "0.3"
@@ -38,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 appview = { path = "crates/appview" }
 hubble = { path = "crates/hubble" }
 jetstream = { path = "crates/jetstream" }
+labeler = { path = "crates/labeler" }
 search = { path = "crates/search" }
 slingshot = { path = "crates/slingshot" }
 store = { path = "crates/store" }

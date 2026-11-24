@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, RawQuery, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::extract::{Path as UrlPath, Query, RawQuery, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ciborium::cbor;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -20,6 +21,7 @@ const EVENT_TYPE_PREFIX: &str = "network.bsky.jetstream.subscribeEvents";
 const SUBPROTOCOL: &str = "xrpc.v1.json";
 const LIVE_EVENT_BUFFER: usize = 1024;
 const AVATAR_BASE_URL: &str = "https://cdn.bsky.app/img/avatar/plain";
+const LABELER: &str = "did:plc:mocklabeler";
 
 type Frame = (u64, String);
 
@@ -29,6 +31,8 @@ struct World {
     frames: Vec<String>,
     live: broadcast::Sender<Frame>,
     connections: Vec<Option<u64>>,
+    label_frames: Vec<Vec<u8>>,
+    live_labels: broadcast::Sender<Vec<u8>>,
 }
 
 impl World {
@@ -67,6 +71,20 @@ impl World {
                 "rkey": "self",
             }),
         );
+    }
+
+    fn emit_label(&mut self, did: &str, val: &str, neg: bool) -> anyhow::Result<()> {
+        let seq = self.label_frames.len() as u64 + 1;
+        let header = cbor!({ "op" => 1, "t" => "#labels" })?;
+        let body = cbor!({ "seq" => seq, "labels" => [{
+            "ver" => 1, "src" => LABELER, "uri" => did, "val" => val, "neg" => neg, "cts" => now(),
+        }]})?;
+        let mut frame = Vec::new();
+        ciborium::into_writer(&header, &mut frame)?;
+        ciborium::into_writer(&body, &mut frame)?;
+        self.label_frames.push(frame.clone());
+        let _ = self.live_labels.send(frame);
+        Ok(())
     }
 
     fn emit(&mut self, kind: &str, did: &str, mut payload: Value) {
@@ -114,12 +132,15 @@ pub async fn run(
     bind: SocketAddr,
 ) -> anyhow::Result<()> {
     let (live, _) = broadcast::channel(LIVE_EVENT_BUFFER);
+    let (live_labels, _) = broadcast::channel(LIVE_EVENT_BUFFER);
     let mut world = World {
         accounts: HashMap::new(),
         failing_lookups: HashSet::new(),
         frames: Vec::new(),
         live,
         connections: Vec::new(),
+        label_frames: Vec::new(),
+        live_labels,
     };
     for account in fixture::read(fixture_path)? {
         world.add_account(account);
@@ -146,11 +167,17 @@ pub async fn run(
         .route("/xrpc/app.bsky.actor.getProfiles", get(get_profiles))
         .route("/xrpc/com.atproto.sync.listRepos", get(list_repos))
         .route("/xrpc/blue.microcosm.hubble.getStats", get(get_stats))
+        .route(
+            "/xrpc/com.atproto.label.subscribeLabels",
+            get(subscribe_labels),
+        )
+        .route("/{did}", get(did_document))
         .route("/control/accounts", post(create_account))
         .route("/control/handle", post(change_handle))
         .route("/control/failing-lookup", post(fail_lookup))
         .route("/control/status", post(change_status))
         .route("/control/followers", post(change_followers))
+        .route("/control/label", post(change_label))
         .route("/control/connections", get(connections))
         .with_state(Arc::new(Mutex::new(world)));
 
@@ -196,6 +223,49 @@ async fn stream_frames(world: SharedWorld, cursor: Option<u64>, mut socket: WebS
             return;
         }
     }
+}
+
+async fn subscribe_labels(
+    State(world): State<SharedWorld>,
+    Query(params): Query<SubscribeParams>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    upgrade.on_upgrade(move |socket| stream_labels(world, params.cursor, socket))
+}
+
+async fn stream_labels(world: SharedWorld, cursor: Option<u64>, mut socket: WebSocket) {
+    let (backlog, mut live) = {
+        let world = world.lock().expect("the world lock is not poisoned");
+        let start = cursor.unwrap_or(0) as usize;
+        let backlog = world.label_frames.get(start..).unwrap_or_default().to_vec();
+        (backlog, world.live_labels.subscribe())
+    };
+
+    for frame in backlog {
+        if socket.send(Message::binary(frame)).await.is_err() {
+            return;
+        }
+    }
+    while let Ok(frame) = live.recv().await {
+        if socket.send(Message::binary(frame)).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn did_document(UrlPath(did): UrlPath<String>, headers: HeaderMap) -> Json<Value> {
+    let host = headers
+        .get("host")
+        .and_then(|host| host.to_str().ok())
+        .unwrap_or_default();
+    Json(json!({
+        "id": did,
+        "service": [{
+            "id": "#atproto_labeler",
+            "type": "AtprotoLabeler",
+            "serviceEndpoint": format!("http://{host}"),
+        }],
+    }))
 }
 
 #[derive(Deserialize)]
@@ -378,6 +448,25 @@ async fn change_followers(
     };
     account.followers = change.followers;
     StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct LabelChange {
+    did: String,
+    val: String,
+    #[serde(default)]
+    neg: bool,
+}
+
+async fn change_label(
+    State(world): State<SharedWorld>,
+    Json(change): Json<LabelChange>,
+) -> StatusCode {
+    let mut world = world.lock().expect("the world lock is not poisoned");
+    match world.emit_label(&change.did, &change.val, change.neg) {
+        Ok(()) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn connections(State(world): State<SharedWorld>) -> Json<Vec<Option<u64>>> {

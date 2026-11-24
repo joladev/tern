@@ -24,6 +24,13 @@ pub struct Actor {
     pub handle: String,
     pub display_name: Option<String>,
     pub avatar: Option<String>,
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Label {
+    pub src: String,
+    pub val: String,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +201,25 @@ impl Harness {
             "status",
             json!({ "did": did, "active": false, "status": "deleted" }),
         );
+    }
+
+    pub fn label(&self, did: &str, val: &str) {
+        self.control("label", json!({ "did": did, "val": val }));
+    }
+
+    pub fn withdraw_label(&self, did: &str, val: &str) {
+        self.control("label", json!({ "did": did, "val": val, "neg": true }));
+    }
+
+    pub fn wait_for_labels(&self, query: &str, vals: &[&str]) {
+        let labelled = wait_for(CHANGE_TIMEOUT, || {
+            let actors = self.search(query);
+            actors.first().is_some_and(|actor| {
+                let found: Vec<&str> = actor.labels.iter().map(|l| l.val.as_str()).collect();
+                found == vals
+            })
+        });
+        assert!(labelled, "`{query}` never had the labels {vals:?}");
     }
 
     pub fn set_followers(&self, did: &str, followers: u64) {

@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+ciborium.workspace = true
 clap.workspace = true
 jiff.workspace = true
 serde.workspace = true

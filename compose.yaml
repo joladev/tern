@@ -22,6 +22,8 @@ services:
       TERN_SLINGSHOT_URL: http://mock:3001
       TERN_APPVIEW_URL: http://mock:3001
       TERN_HUBBLE_URL: http://mock:3001
+      TERN_LABELERS: did:plc:mocklabeler
+      TERN_PLC_URL: http://mock:3001
       TERN_BACKFILL: "true"
       TERN_REFRESH_AFTER: "2s"
     ports:

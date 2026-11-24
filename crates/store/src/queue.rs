@@ -10,6 +10,7 @@ use crate::{BackfillProgress, Error, Store};
 const JETSTREAM_POSITION: &str = "position:jetstream";
 const BACKFILL_POSITION: &str = "position:backfill";
 const STALE_POSITION: &str = "position:stale";
+const LABELER_POSITION: &str = "position:labeler:";
 const KEY_LEN: usize = 9;
 const FEED_LANE: usize = 2;
 const LANES: usize = 3;
@@ -37,6 +38,7 @@ pub enum Position {
     Jetstream(u64),
     Backfill(BackfillProgress),
     Stale(Option<Did>),
+    Labeler { labeler: Did, seq: u64 },
 }
 
 #[derive(Debug, PartialEq)]
@@ -107,6 +109,10 @@ impl Store {
             Some(Position::Stale(after)) => {
                 let value = postcard::to_stdvec(&after)?;
                 batch.insert(&self.meta, STALE_POSITION, value);
+            }
+            Some(Position::Labeler { labeler, seq }) => {
+                let value = postcard::to_stdvec(&seq)?;
+                batch.insert(&self.meta, labeler_position_key(&labeler), value);
             }
             None => {}
         }
@@ -192,6 +198,13 @@ impl Store {
         Ok(postcard::from_bytes(&bytes)?)
     }
 
+    pub fn labeler_position(&self, labeler: &Did) -> Result<Option<u64>, Error> {
+        let Some(bytes) = self.meta.get(labeler_position_key(labeler))? else {
+            return Ok(None);
+        };
+        Ok(Some(postcard::from_bytes(&bytes)?))
+    }
+
     fn next_key(&self, lane: usize) -> Key {
         let sequence = self
             .queue_state
@@ -199,6 +212,10 @@ impl Store {
             .fetch_add(1, Ordering::Relaxed);
         key(lane, sequence)
     }
+}
+
+fn labeler_position_key(labeler: &Did) -> String {
+    format!("{LABELER_POSITION}{labeler}")
 }
 
 fn key(lane: usize, sequence: u64) -> Key {
@@ -284,13 +301,23 @@ mod tests {
             records: Vec::new(),
         };
 
-        store.enqueue_feed(vec![labels.clone()], None).unwrap();
+        let labeler = job("labeler").did;
+        let position = Position::Labeler {
+            labeler: labeler.clone(),
+            seq: 7,
+        };
+
+        store
+            .enqueue_feed(vec![labels.clone()], Some(position))
+            .unwrap();
         store.enqueue(Lane::Live, vec![job("new")], None).unwrap();
 
         assert_eq!(names(&store.next_jobs(10).unwrap()), ["did:plc:new"]);
         let fed = store.next_feed_jobs(10).unwrap();
         assert_eq!(fed[0].job, labels);
         assert_eq!(store.feed_depth(), 1);
+        assert_eq!(store.labeler_position(&labeler).unwrap(), Some(7));
+        assert_eq!(store.labeler_position(&job("other").did).unwrap(), None);
     }
 
     #[test]

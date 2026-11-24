@@ -6,8 +6,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 const INVALID_HANDLE: &str = "handle.invalid";
-const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
-const PROFILE_RKEY: &str = "self";
+const AT_SCHEME: &str = "at://";
+const PROFILE_PATH: &str = "/app.bsky.actor.profile/self";
 const EPOCH: &str = "1970-01-01T00:00:00.000Z";
 const MAX_DISPLAY_NAME_BYTES: usize = 640;
 
@@ -29,6 +29,14 @@ impl TryFrom<String> for Did {
             return Ok(Did(value));
         }
         Err(ParseError::Did(value))
+    }
+}
+
+impl std::str::FromStr for Did {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Did, ParseError> {
+        Did::try_from(text.to_owned())
     }
 }
 
@@ -217,7 +225,7 @@ impl SelfLabels {
         });
         let label = |val: &String| Label {
             src: did.clone(),
-            uri: format!("at://{did}/{PROFILE_COLLECTION}/{PROFILE_RKEY}"),
+            uri: profile_uri(did),
             cid: self.cid.clone(),
             val: val.clone(),
             cts: cts.clone(),
@@ -225,6 +233,10 @@ impl SelfLabels {
         };
         self.values.iter().map(label).collect()
     }
+}
+
+fn profile_uri(did: &Did) -> String {
+    format!("{AT_SCHEME}{did}{PROFILE_PATH}")
 }
 
 pub fn display_name(name: Option<String>) -> Option<String> {
@@ -313,6 +325,12 @@ impl Label {
     pub fn is_same_label(&self, other: &Label) -> bool {
         (&self.src, &self.uri, &self.cid, &self.val)
             == (&other.src, &other.uri, &other.cid, &other.val)
+    }
+
+    pub fn account(&self) -> Option<Did> {
+        let profile = self.uri.strip_prefix(AT_SCHEME);
+        let owner = profile.and_then(|rest| rest.strip_suffix(PROFILE_PATH));
+        Did::try_from(owner.unwrap_or(&self.uri).to_owned()).ok()
     }
 }
 
@@ -421,6 +439,27 @@ mod tests {
         );
         assert_eq!(labels[0].val, "porn");
         assert_eq!(labels[0].cts.as_str(), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_label_on_an_account_or_its_profile_is_about_that_account() {
+        let alice = Did::try_from("did:plc:alice".to_owned()).unwrap();
+        let label = |uri: &str| Label {
+            src: alice.clone(),
+            uri: uri.to_owned(),
+            cid: None,
+            val: "spam".to_owned(),
+            cts: Datetime::try_from(EPOCH.to_owned()).unwrap(),
+            exp: None,
+        };
+
+        let on_account = label("did:plc:alice");
+        let on_profile = label("at://did:plc:alice/app.bsky.actor.profile/self");
+        let on_post = label("at://did:plc:alice/app.bsky.feed.post/3k");
+
+        assert_eq!(on_account.account(), Some(alice.clone()));
+        assert_eq!(on_profile.account(), Some(alice.clone()));
+        assert_eq!(on_post.account(), None);
     }
 
     #[test]

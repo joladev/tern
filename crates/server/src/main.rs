@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+use types::Did;
 
 use feed::Feed;
 use refresh::Refresh;
@@ -30,6 +31,7 @@ use sources::slingshot::{SlingshotIdentity, SlingshotProfile};
 use telemetry::Exporter;
 use triggers::backfill::Backfill;
 use triggers::jetstream::Jetstream;
+use triggers::labeler::Labeler;
 use triggers::stale::Stale;
 use writer::Writer;
 
@@ -42,6 +44,7 @@ const WRITER_QUEUE_SIZE: usize = 1024;
 // items to it.
 const FEED_QUEUE_SIZE: usize = 1;
 const JETSTREAM_QUEUE_SIZE: usize = 10_000;
+const LABELER_QUEUE_SIZE: usize = 1_000;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -126,6 +129,15 @@ struct ServeArgs {
     appview_concurrency: u64,
     #[arg(long, env = "TERN_REFRESH_AFTER", default_value = "168h")]
     refresh_after: SignedDuration,
+    #[arg(
+        long,
+        env = "TERN_LABELERS",
+        value_delimiter = ',',
+        default_value = "did:plc:ar7c4by46qjdydhdevvrndac"
+    )]
+    labelers: Vec<Did>,
+    #[arg(long, env = "TERN_PLC_URL", default_value = "https://plc.directory")]
+    plc_url: String,
 }
 
 #[tokio::main]
@@ -181,6 +193,23 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         }),
     ];
 
+    let mut labelers = Vec::new();
+    for did in args.labelers {
+        let cursor = store.labeler_position(&did)?.unwrap_or(0);
+        let subscription = labeler::subscribe(
+            http_client.clone(),
+            args.plc_url.clone(),
+            did.clone(),
+            cursor,
+            LABELER_QUEUE_SIZE,
+        );
+        labelers.push(Labeler {
+            labeler: did,
+            subscription,
+            store: Arc::clone(&store),
+        });
+    }
+
     let backfill = Backfill {
         hubble: hubble::Client::new(http_client, args.hubble_url),
         store: Arc::clone(&store),
@@ -232,6 +261,9 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
     spawn_until_cancelled(&mut tasks, &cancel, stale.run());
     spawn_until_cancelled(&mut tasks, &cancel, refresh.run());
     spawn_until_cancelled(&mut tasks, &cancel, feed.run());
+    for labeler in labelers {
+        spawn_until_cancelled(&mut tasks, &cancel, labeler.run());
+    }
     spawn_until_cancelled(&mut tasks, &cancel, async move {
         server.await.context("the HTTP server failed")
     });

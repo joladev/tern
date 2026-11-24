@@ -17,6 +17,7 @@ axum.workspace = true
 clap.workspace = true
 jetstream.workspace = true
 jiff.workspace = true
+labeler.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-process.workspace = true

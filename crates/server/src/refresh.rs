@@ -89,7 +89,7 @@ mod tests {
             let facts = Facts {
                 profile: Some(Profile {
                     display_name: Some(self.0.to_owned()),
-                    avatar_cid: None,
+                    ..Profile::default()
                 }),
                 ..Facts::default()
             };

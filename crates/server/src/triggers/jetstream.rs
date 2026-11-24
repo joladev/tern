@@ -65,7 +65,7 @@ mod tests {
     fn a_job_carries_what_its_event_says() {
         let profile = Profile {
             display_name: Some("Alice".to_owned()),
-            avatar_cid: None,
+            ..Profile::default()
         };
 
         assert_eq!(seen(EventKind::Identity), Facts::default());

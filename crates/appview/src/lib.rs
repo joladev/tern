@@ -1,7 +1,7 @@
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
 use types::{
-    AppviewVerification, Datetime, Did, Enrichment, Handle, Label, Profile, Verification,
+    AppviewVerification, Datetime, Did, Enrichment, Handle, Profile, Verification,
     VerificationState,
 };
 
@@ -31,7 +31,6 @@ pub struct ProfileView {
     pub handle: Option<Handle>,
     pub profile: Profile,
     pub enrichment: Enrichment,
-    pub labels: Vec<Label>,
     pub verification: Option<AppviewVerification>,
 }
 
@@ -50,8 +49,6 @@ struct RawProfile {
     created_at: Option<String>,
     #[serde(default)]
     followers_count: i64,
-    #[serde(default)]
-    labels: Vec<RawLabel>,
     verification: Option<RawVerificationState>,
 }
 
@@ -101,34 +98,12 @@ impl RawVerification {
     }
 }
 
-#[derive(Deserialize)]
-struct RawLabel {
-    src: String,
-    uri: String,
-    cid: Option<String>,
-    val: String,
-    cts: String,
-    exp: Option<String>,
-}
-
-impl RawLabel {
-    fn into_label(self) -> Option<Label> {
-        Some(Label {
-            src: Did::try_from(self.src).ok()?,
-            uri: self.uri,
-            cid: self.cid,
-            val: self.val,
-            cts: Datetime::try_from(self.cts).ok()?,
-            exp: self.exp.map(Datetime::try_from).transpose().ok()?,
-        })
-    }
-}
-
 impl From<RawProfile> for ProfileView {
     fn from(raw: RawProfile) -> ProfileView {
         let profile = Profile {
             display_name: types::display_name(raw.display_name),
             avatar_cid: raw.avatar.as_deref().and_then(avatar_cid),
+            self_labels: None,
         };
         let enrichment = Enrichment {
             followers: count(raw.followers_count),
@@ -137,11 +112,6 @@ impl From<RawProfile> for ProfileView {
                 .and_then(|time| Datetime::try_from(time).ok()),
         };
         let handle = Handle::try_from(raw.handle).ok();
-        let labels = raw
-            .labels
-            .into_iter()
-            .filter_map(RawLabel::into_label)
-            .collect();
         let verification = raw.verification.map(|state| AppviewVerification {
             handle: handle.clone(),
             display_name: profile.display_name.clone(),
@@ -152,7 +122,6 @@ impl From<RawProfile> for ProfileView {
             handle,
             profile,
             enrichment,
-            labels,
             verification,
         }
     }
@@ -197,53 +166,6 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn labels_with_invalid_times_are_left_out() {
-        let profile = r#"{
-            "did": "did:plc:x",
-            "handle": "x.test",
-            "labels": [{
-                "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-                "uri": "did:plc:x",
-                "val": "spam",
-                "cts": "2026-03-09T14:53:09.930Z",
-                "exp": "next tuesday"
-            }]
-        }"#;
-        let raw: RawProfile = serde_json::from_str(profile).unwrap();
-
-        assert!(ProfileView::from(raw).labels.is_empty());
-    }
-
-    #[test]
-    fn reads_labels_from_a_profile() {
-        let profile = r#"{
-            "did": "did:plc:x",
-            "handle": "x.test",
-            "labels": [{
-                "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-                "uri": "at://did:plc:x/app.bsky.actor.profile/self",
-                "cid": "bafyrei",
-                "val": "porn",
-                "cts": "2026-03-09T14:53:09.930Z",
-                "ver": 1
-            }]
-        }"#;
-        let raw: RawProfile = serde_json::from_str(profile).unwrap();
-
-        let view = ProfileView::from(raw);
-
-        let label = Label {
-            src: Did::try_from("did:plc:ar7c4by46qjdydhdevvrndac".to_owned()).unwrap(),
-            uri: "at://did:plc:x/app.bsky.actor.profile/self".to_owned(),
-            cid: Some("bafyrei".to_owned()),
-            val: "porn".to_owned(),
-            cts: Datetime::try_from("2026-03-09T14:53:09.930Z".to_owned()).unwrap(),
-            exp: None,
-        };
-        assert_eq!(view.labels, [label]);
-    }
 
     #[test]
     fn reads_the_verification_for_the_handle_and_name_it_judged() {

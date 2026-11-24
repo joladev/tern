@@ -3,10 +3,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use search::Actor;
-use store::{LabelOrigin, Queued, Store};
+use store::{Queued, Store};
 use tokio::sync::mpsc;
 use tokio::task::block_in_place;
-use types::{Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, Status};
+use types::{
+    Account, Did, Enrichment, Facts, Fetched, HandleFact, Label, LabelJob, LabelRecord, Status,
+};
 
 use crate::score;
 
@@ -24,6 +26,7 @@ pub struct Writer {
     has_changes: bool,
     rebuild: Option<Rebuild>,
     finished: Vec<Queued>,
+    finished_feed: Vec<Queued<LabelJob>>,
 }
 
 struct Rebuild {
@@ -38,10 +41,15 @@ impl Writer {
             has_changes: false,
             rebuild: None,
             finished: Vec::new(),
+            finished_feed: Vec::new(),
         }
     }
 
-    pub async fn run(mut self, mut inbox: mpsc::Receiver<Round>) -> anyhow::Result<()> {
+    pub async fn run(
+        mut self,
+        mut inbox: mpsc::Receiver<Round>,
+        mut feed: mpsc::Receiver<Vec<Queued<LabelJob>>>,
+    ) -> anyhow::Result<()> {
         if self.index.needs_rebuild() {
             self.start_rebuild()?;
         }
@@ -52,6 +60,12 @@ impl Writer {
                     Some(round) => block_in_place(|| self.apply_round(round))?,
                     None => break,
                 },
+                // To avoid slowing down refresh work, the feed channel is
+                // only read when the writer has no other work to do. In practice
+                // this will be between refreshes.
+                Some(jobs) = feed.recv(), if inbox.is_empty() => {
+                    block_in_place(|| self.apply_feed(jobs))?;
+                }
                 _ = commit.tick() => block_in_place(|| self.commit())?,
                 () = std::future::ready(()), if self.rebuild.is_some() => {
                     block_in_place(|| self.rebuild_step())?;
@@ -132,9 +146,28 @@ impl Writer {
         Ok(())
     }
 
+    fn apply_feed(&mut self, jobs: Vec<Queued<LabelJob>>) -> anyhow::Result<()> {
+        for queued in jobs {
+            self.apply_records(&queued.job.did, &queued.job.records)?;
+            self.finished_feed.push(queued);
+        }
+        self.has_changes = true;
+        Ok(())
+    }
+
     fn apply_facts(&self, did: &Did, facts: Facts) -> anyhow::Result<()> {
         let before = self.document(did)?;
         self.save(did, facts)?;
+        self.reindex(did, before)
+    }
+
+    fn apply_records(&self, did: &Did, records: &[LabelRecord]) -> anyhow::Result<()> {
+        let before = self.document(did)?;
+        self.store.store_label_records(did, records)?;
+        self.reindex(did, before)
+    }
+
+    fn reindex(&self, did: &Did, before: Option<(Actor, u64)>) -> anyhow::Result<()> {
         let after = self.document(did)?;
         if before == after {
             return Ok(());
@@ -177,9 +210,6 @@ impl Writer {
                 None => self.store.enrichment(did)?,
             };
             self.store.put_enrichment(did, &enrichment, now())?;
-            if let Some(labels) = &facts.labels {
-                self.store.put_labels(did, LabelOrigin::Appview, labels)?;
-            }
         }
         if stored.as_ref() != Some(&account) {
             self.store.put_account(did, &account)?;
@@ -204,10 +234,13 @@ impl Writer {
         did: &Did,
         account: &Account,
         enrichment: &Enrichment,
-        labels: Vec<Label>,
+        mut labels: Vec<Label>,
         now: i64,
     ) -> Option<(Actor, u64)> {
         let handle = account.searchable_handle()?;
+        if let Some(self_labels) = &account.profile.self_labels {
+            labels.extend(self_labels.labels(did));
+        }
         let actor = Actor {
             did: did.clone(),
             handle: handle.clone(),
@@ -234,7 +267,9 @@ impl Writer {
         self.store.persist().context("failed to flush the store")?;
         self.index.commit().context("failed to commit the index")?;
         self.store.finish(&self.finished)?;
+        self.store.finish(&self.finished_feed)?;
         self.finished.clear();
+        self.finished_feed.clear();
         self.has_changes = false;
         metrics::histogram!("tern_commit_seconds").record(start.elapsed());
         self.record_index();
@@ -249,7 +284,9 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use store::Lane;
-    use types::{AppviewVerification, Datetime, Handle, Job, Profile, VerificationState};
+    use types::{
+        AppviewVerification, Datetime, Handle, Job, Profile, SelfLabels, VerificationState,
+    };
 
     use super::*;
 
@@ -306,9 +343,35 @@ mod tests {
         Facts {
             profile: Some(Profile {
                 display_name: Some(name.to_owned()),
-                avatar_cid: None,
+                ..Profile::default()
             }),
             ..Facts::default()
+        }
+    }
+
+    fn label(val: &str) -> Label {
+        Label {
+            src: did("labeler"),
+            uri: "did:plc:a".to_owned(),
+            cid: None,
+            val: val.to_owned(),
+            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
+            exp: None,
+        }
+    }
+
+    fn issued(label: Label) -> LabelRecord {
+        LabelRecord {
+            label,
+            withdrawn: false,
+        }
+    }
+
+    fn withdrawn(label: Label) -> LabelRecord {
+        let cts = Datetime::try_from("2026-02-01T00:00:00Z".to_owned()).unwrap();
+        LabelRecord {
+            label: Label { cts, ..label },
+            withdrawn: true,
         }
     }
 
@@ -342,6 +405,17 @@ mod tests {
                 fetched,
             };
             self.writer.apply_round(round).unwrap();
+            self.writer.commit().unwrap();
+        }
+
+        fn feed(&mut self, name: &str, record: LabelRecord) {
+            let job = LabelJob {
+                did: did(name),
+                records: vec![record],
+            };
+            self.store.enqueue_feed(vec![job], None).unwrap();
+            let jobs = self.store.next_feed_jobs(10).unwrap();
+            self.writer.apply_feed(jobs).unwrap();
             self.writer.commit().unwrap();
         }
 
@@ -542,29 +616,53 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_stored_and_indexed() {
+    fn a_label_from_the_feed_shows_on_the_account_until_it_is_withdrawn() {
         let mut fixture = fixture();
-        let label = Label {
-            src: did("labeler"),
-            uri: "did:plc:a".to_owned(),
+        fixture.fetched("a", handle("a"));
+
+        fixture.feed("a", issued(label("spam")));
+        let found = fixture.reader.search("a.test", 1).unwrap();
+        assert_eq!(found[0].labels, [label("spam")]);
+
+        fixture.feed("a", withdrawn(label("spam")));
+        let found = fixture.reader.search("a.test", 1).unwrap();
+        assert!(found[0].labels.is_empty());
+    }
+
+    #[test]
+    fn a_label_for_an_unknown_account_is_kept_without_creating_the_account() {
+        let mut fixture = fixture();
+
+        fixture.feed("a", issued(label("spam")));
+        assert!(fixture.store.account(&did("a")).unwrap().is_none());
+
+        fixture.fetched("a", handle("a"));
+        let found = fixture.reader.search("a.test", 1).unwrap();
+        assert_eq!(found[0].labels, [label("spam")]);
+    }
+
+    #[test]
+    fn self_labels_on_the_profile_are_shown_after_the_labels_from_labelers() {
+        let mut fixture = fixture();
+        let self_labels = SelfLabels {
+            values: vec!["porn".to_owned()],
             cid: None,
-            val: "spam".to_owned(),
-            cts: Datetime::try_from("2026-01-01T00:00:00Z".to_owned()).unwrap(),
-            exp: None,
+            created_at: None,
         };
-        let labelled = Facts {
-            labels: Some(vec![label.clone()]),
+        let profile = Facts {
+            profile: Some(Profile {
+                self_labels: Some(self_labels.clone()),
+                ..Profile::default()
+            }),
             ..handle("a")
         };
+        fixture.feed("a", issued(label("spam")));
 
-        fixture.fetched("a", labelled);
+        fixture.fetched("a", profile);
 
-        assert_eq!(
-            fixture.store.labels(&did("a")).unwrap(),
-            std::slice::from_ref(&label)
-        );
         let found = fixture.reader.search("a.test", 1).unwrap();
-        assert_eq!(found[0].labels, [label]);
+        let shown = [vec![label("spam")], self_labels.labels(&did("a"))].concat();
+        assert_eq!(found[0].labels, shown);
     }
 
     #[test]

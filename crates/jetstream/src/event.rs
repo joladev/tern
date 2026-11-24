@@ -60,6 +60,7 @@ enum Payload {
         time: String,
         collection: String,
         rkey: String,
+        cid: Option<String>,
         record: Option<ProfileRecord>,
     },
     #[serde(other)]
@@ -93,10 +94,13 @@ impl Frame {
                 did,
                 time,
                 collection,
+                cid,
                 record,
                 rkey,
             } if collection == PROFILE_COLLECTION && rkey == PROFILE_RKEY => {
-                let profile = record.map(Profile::from).unwrap_or_default();
+                let profile = record
+                    .map(|record| Profile::from_record(record, cid))
+                    .unwrap_or_default();
                 event(seq, did, &time, EventKind::Profile(profile))
             }
             Payload::Commit { .. } | Payload::Other => {
@@ -129,6 +133,8 @@ impl AccountStatus {
 
 #[cfg(test)]
 mod tests {
+    use types::{Datetime, SelfLabels};
+
     use super::*;
 
     fn did() -> Did {
@@ -150,15 +156,24 @@ mod tests {
                     "avatar":{"$type":"blob","mimeType":"image/jpeg",
                         "ref":{"$link":"bafkrei"},"size":1},
                     "createdAt":"2024-11-16T16:08:49.713Z",
-                    "displayName":"Alice"},
+                    "displayName":"Alice",
+                    "labels":{"$type":"com.atproto.label.defs#selfLabels",
+                        "values":[{"val":"porn"}]}},
                 "rev":"3mzb","rkey":"self","seq":7,
                 "time":"t"}}"#,
         )
         .unwrap();
 
+        let created_at = "2024-11-16T16:08:49.713Z".to_owned();
+        let self_labels = SelfLabels {
+            values: vec!["porn".to_owned()],
+            cid: Some("bafyrei".to_owned()),
+            created_at: Datetime::try_from(created_at).ok(),
+        };
         let profile = Profile {
             display_name: Some("Alice".to_owned()),
             avatar_cid: Some("bafkrei".to_owned()),
+            self_labels: Some(self_labels),
         };
         let kind = EventKind::Profile(profile);
         assert_eq!(frame, event(7, did(), "t", kind));

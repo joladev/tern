@@ -1,3 +1,4 @@
+mod feed;
 mod http;
 mod refresh;
 mod score;
@@ -21,6 +22,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+use feed::Feed;
 use refresh::Refresh;
 use sources::Source;
 use sources::appview::Appview;
@@ -35,6 +37,10 @@ use writer::Writer;
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const WRITER_QUEUE_SIZE: usize = 1024;
+// This controls how many feed batches that can be waiting for the writer.
+// This ensures that if the writer is overwhelmed, the feed stops pushing
+// items to it.
+const FEED_QUEUE_SIZE: usize = 1;
 const JETSTREAM_QUEUE_SIZE: usize = 10_000;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -195,6 +201,11 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
         sources,
         writer: writer_queue,
     };
+    let (feed_queue, feed_inbox) = mpsc::channel(FEED_QUEUE_SIZE);
+    let feed = Feed {
+        store: Arc::clone(&store),
+        writer: feed_queue,
+    };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -216,10 +227,11 @@ async fn serve(data_dir: &Path, args: ServeArgs) -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
     spawn_finite(&mut tasks, &cancel, backfill.run());
-    spawn_until_drained(&mut tasks, &cancel, writer.run(inbox));
+    spawn_until_drained(&mut tasks, &cancel, writer.run(inbox, feed_inbox));
     spawn_until_cancelled(&mut tasks, &cancel, jetstream.run());
     spawn_until_cancelled(&mut tasks, &cancel, stale.run());
     spawn_until_cancelled(&mut tasks, &cancel, refresh.run());
+    spawn_until_cancelled(&mut tasks, &cancel, feed.run());
     spawn_until_cancelled(&mut tasks, &cancel, async move {
         server.await.context("the HTTP server failed")
     });

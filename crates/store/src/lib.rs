@@ -7,7 +7,7 @@ use std::path::Path;
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, KvPair, PersistMode, Slice};
 use serde::{Deserialize, Serialize};
-use types::{Account, Did, Enrichment, Label};
+use types::{Account, Did, Enrichment, Label, LabelRecord};
 
 use queue::QueueState;
 pub use queue::{Lane, Position, Queued};
@@ -51,18 +51,6 @@ pub struct BackfillProgress {
 pub struct EnrichmentRow {
     pub enrichment: Enrichment,
     pub fetched_at: i64,
-}
-
-pub enum LabelOrigin {
-    Appview,
-}
-
-impl LabelOrigin {
-    fn key(&self) -> &str {
-        match self {
-            LabelOrigin::Appview => "appview",
-        }
-    }
 }
 
 pub struct Store {
@@ -122,37 +110,40 @@ impl Store {
         let mut batch = self.database.batch();
         batch.insert(&self.accounts, did.as_str(), postcard::to_stdvec(&blank)?);
         batch.remove(&self.enrichment, did.as_str());
-        for entry in self.labels.prefix(labels_prefix(did)) {
-            batch.remove(&self.labels, entry.key()?);
-        }
         Ok(batch.commit()?)
     }
 
-    pub fn put_labels(
-        &self,
-        did: &Did,
-        origin: LabelOrigin,
-        labels: &[Label],
-    ) -> Result<bool, Error> {
-        let key = labels_key(did, &origin);
-        let stored = self.labels.get(&key)?;
-        if labels.is_empty() {
-            if stored.is_some() {
-                self.labels.remove(key)?;
+    pub fn store_label_records(&self, did: &Did, records: &[LabelRecord]) -> Result<(), Error> {
+        let stored = self.label_records(did)?;
+        let mut kept = stored.clone();
+        for record in records {
+            let same = kept
+                .iter_mut()
+                .find(|kept| kept.label.is_same_label(&record.label));
+            match same {
+                Some(kept) if record.label.cts.timestamp() > kept.label.cts.timestamp() => {
+                    *kept = record.clone();
+                }
+                Some(_) => {}
+                None => kept.push(record.clone()),
             }
-            return Ok(stored.is_some());
         }
-        let value = postcard::to_stdvec(labels)?;
-        if stored.as_deref() == Some(value.as_slice()) {
-            return Ok(false);
+        if kept != stored {
+            let value = postcard::to_stdvec(&kept)?;
+            self.labels.insert(did.as_str(), value)?;
         }
-        self.labels.insert(key, value)?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn labels(&self, did: &Did) -> Result<Vec<Label>, Error> {
-        let entries = self.labels.prefix(labels_prefix(did));
-        merge_labels(entries.map(|entry| entry.into_inner()))
+        Ok(live(self.label_records(did)?))
+    }
+
+    fn label_records(&self, did: &Did) -> Result<Vec<LabelRecord>, Error> {
+        let Some(bytes) = self.labels.get(did.as_str())? else {
+            return Ok(Vec::new());
+        };
+        Ok(postcard::from_bytes(&bytes)?)
     }
 
     pub fn put_enrichment(
@@ -182,7 +173,11 @@ impl Store {
             .peekable();
         rows.into_iter()
             .map(|(did, account, row)| {
-                let labels = labels_for(&mut labels, &did)?;
+                let labels = value_for(&mut labels, did.as_str().as_bytes())?
+                    .map(|bytes| postcard::from_bytes(&bytes))
+                    .transpose()?
+                    .map(live)
+                    .unwrap_or_default();
                 Ok(StoredAccount {
                     did,
                     account,
@@ -267,53 +262,12 @@ fn following(did: Option<&Did>) -> (Bound<&str>, Bound<&str>) {
     (start, Bound::Unbounded)
 }
 
-fn labels_for(
-    entries: &mut Peekable<impl Iterator<Item = fjall::Result<KvPair>>>,
-    did: &Did,
-) -> Result<Vec<Label>, Error> {
-    let prefix = labels_prefix(did);
-    let before = |entry: &fjall::Result<KvPair>| {
-        entry
-            .as_ref()
-            .map_or(true, |(key, _)| &**key < prefix.as_slice())
-    };
-    while let Some(entry) = entries.next_if(before) {
-        entry?;
-    }
-    let owned = std::iter::from_fn(|| {
-        entries.next_if(|entry| {
-            entry
-                .as_ref()
-                .is_ok_and(|(key, _)| key.starts_with(&prefix))
-        })
-    });
-    merge_labels(owned)
-}
-
-fn merge_labels(entries: impl Iterator<Item = fjall::Result<KvPair>>) -> Result<Vec<Label>, Error> {
-    let mut labels = Vec::new();
-    for entry in entries {
-        let (_, bytes) = entry?;
-        let from_origin: Vec<Label> = postcard::from_bytes(&bytes)?;
-        for label in from_origin {
-            if !labels.contains(&label) {
-                labels.push(label);
-            }
-        }
-    }
-    Ok(labels)
-}
-
-fn labels_prefix(did: &Did) -> Vec<u8> {
-    let mut prefix = did.as_str().as_bytes().to_vec();
-    prefix.push(0);
-    prefix
-}
-
-fn labels_key(did: &Did, origin: &LabelOrigin) -> Vec<u8> {
-    let mut key = labels_prefix(did);
-    key.extend_from_slice(origin.key().as_bytes());
-    key
+fn live(records: Vec<LabelRecord>) -> Vec<Label> {
+    records
+        .into_iter()
+        .filter(|record| !record.withdrawn)
+        .map(|record| record.label)
+        .collect()
 }
 
 fn did_from_bytes(bytes: &[u8]) -> Result<Did, Error> {
@@ -358,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn blanking_an_account_keeps_only_an_inactive_row() {
+    fn blanking_an_account_keeps_an_inactive_row_and_labels_from_labelers() {
         let (_dir, store) = open();
         let alice = did("alice");
         let enrichment = Enrichment {
@@ -368,7 +322,7 @@ mod tests {
         store.put_account(&alice, &account("alice.test")).unwrap();
         store.put_enrichment(&alice, &enrichment, 10).unwrap();
         store
-            .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
+            .store_label_records(&alice, &[issued(label("spam"))])
             .unwrap();
 
         store.blank_account(&alice).unwrap();
@@ -379,7 +333,7 @@ mod tests {
         };
         assert_eq!(store.account(&alice).unwrap(), Some(blank));
         assert_eq!(store.enrichment(&alice).unwrap(), Enrichment::default());
-        assert!(store.labels(&alice).unwrap().is_empty());
+        assert_eq!(store.labels(&alice).unwrap(), [label("spam")]);
     }
 
     fn label(val: &str) -> Label {
@@ -393,33 +347,52 @@ mod tests {
         }
     }
 
+    fn issued(label: Label) -> LabelRecord {
+        LabelRecord {
+            label,
+            withdrawn: false,
+        }
+    }
+
+    fn withdrawn(label: Label) -> LabelRecord {
+        let cts = Datetime::try_from("2026-02-01T00:00:00Z".to_owned()).unwrap();
+        LabelRecord {
+            label: Label { cts, ..label },
+            withdrawn: true,
+        }
+    }
+
     #[test]
-    fn putting_labels_replaces_them_and_an_empty_list_clears_them() {
+    fn the_newest_record_for_a_label_is_the_one_that_counts() {
         let (_dir, store) = open();
         let alice = did("alice");
+        let spam = issued(label("spam"));
 
         store
-            .put_labels(&alice, LabelOrigin::Appview, &[label("spam")])
+            .store_label_records(&alice, std::slice::from_ref(&spam))
             .unwrap();
-        store
-            .put_labels(&alice, LabelOrigin::Appview, &[label("porn")])
-            .unwrap();
-        assert_eq!(store.labels(&alice).unwrap(), [label("porn")]);
+        assert_eq!(store.labels(&alice).unwrap(), [label("spam")]);
 
-        store.put_labels(&alice, LabelOrigin::Appview, &[]).unwrap();
+        store
+            .store_label_records(&alice, &[withdrawn(label("spam")), spam])
+            .unwrap();
         assert!(store.labels(&alice).unwrap().is_empty());
     }
 
     #[test]
-    fn putting_labels_reports_whether_they_changed() {
+    fn a_withdrawal_for_another_version_leaves_the_label() {
         let (_dir, store) = open();
         let alice = did("alice");
-        let put = |labels: &[Label]| store.put_labels(&alice, LabelOrigin::Appview, labels);
+        let version = |cid: &str| Label {
+            cid: Some(cid.to_owned()),
+            ..label("porn")
+        };
 
-        assert!(put(&[label("spam")]).unwrap());
-        assert!(!put(&[label("spam")]).unwrap());
-        assert!(put(&[]).unwrap());
-        assert!(!put(&[]).unwrap());
+        store
+            .store_label_records(&alice, &[issued(version("a")), withdrawn(version("b"))])
+            .unwrap();
+
+        assert_eq!(store.labels(&alice).unwrap(), [version("a")]);
     }
 
     #[test]
@@ -429,24 +402,13 @@ mod tests {
             store.put_account(&did(name), &account("x.test")).unwrap();
         }
         store
-            .put_labels(&did("b"), LabelOrigin::Appview, &[label("spam")])
+            .store_label_records(&did("b"), &[issued(label("spam"))])
             .unwrap();
 
         let rows = store.accounts_after(Some(&did("a")), 10).unwrap();
 
         let found: Vec<_> = rows.into_iter().map(|row| (row.did, row.labels)).collect();
         assert_eq!(found, [(did("b"), vec![label("spam")]), (did("c"), vec![])]);
-    }
-
-    #[test]
-    fn labels_belong_to_one_account_only() {
-        let (_dir, store) = open();
-        store
-            .put_labels(&did("alice"), LabelOrigin::Appview, &[label("spam")])
-            .unwrap();
-
-        assert!(store.labels(&did("ali")).unwrap().is_empty());
-        assert!(store.labels(&did("alice2")).unwrap().is_empty());
     }
 
     #[test]

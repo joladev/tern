@@ -38,6 +38,7 @@ struct MiniDoc {
 
 #[derive(Deserialize)]
 struct Record {
+    cid: Option<String>,
     value: ProfileRecord,
 }
 
@@ -86,7 +87,7 @@ impl Client {
         match response.status() {
             StatusCode::OK => {
                 let record: Record = response.json().await.map_err(Error::Body)?;
-                Ok(Profile::from(record.value))
+                Ok(Profile::from_record(record.value, record.cid))
             }
             StatusCode::BAD_REQUEST => {
                 let failure: Failure = response.json().await.map_err(Error::Body)?;
@@ -124,8 +125,9 @@ mod tests {
         let profile = Profile {
             display_name: Some("Alice".to_owned()),
             avatar_cid: Some("bafkrei".to_owned()),
+            self_labels: None,
         };
-        assert_eq!(Profile::from(record.value), profile);
+        assert_eq!(Profile::from_record(record.value, record.cid), profile);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fjall::Keyspace;
-use types::{Did, Job};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use types::{Did, Job, LabelJob};
 
 use crate::{BackfillProgress, Error, Store};
 
@@ -9,6 +11,8 @@ const JETSTREAM_POSITION: &str = "position:jetstream";
 const BACKFILL_POSITION: &str = "position:backfill";
 const STALE_POSITION: &str = "position:stale";
 const KEY_LEN: usize = 9;
+const FEED_LANE: usize = 2;
+const LANES: usize = 3;
 
 type Key = [u8; KEY_LEN];
 
@@ -27,14 +31,6 @@ impl Lane {
             Lane::Background => 1,
         }
     }
-
-    fn of(key: &Key) -> Result<Lane, Error> {
-        match key[0] {
-            0 => Ok(Lane::Live),
-            1 => Ok(Lane::Background),
-            _ => Err(Error::BadQueueKey),
-        }
-    }
 }
 
 pub enum Position {
@@ -44,16 +40,16 @@ pub enum Position {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Queued {
+pub struct Queued<T = Job> {
     key: Key,
-    pub job: Job,
+    pub job: T,
 }
 
 #[derive(Default)]
 pub(crate) struct QueueState {
     next_sequence: AtomicU64,
-    heads: [AtomicU64; 2],
-    depths: [AtomicUsize; 2],
+    heads: [AtomicU64; LANES],
+    depths: [AtomicUsize; LANES],
 }
 
 impl QueueState {
@@ -61,7 +57,7 @@ impl QueueState {
         let state = QueueState::default();
         for entry in queue.iter() {
             let key = parse_key(&entry.key()?)?;
-            state.depths[Lane::of(&key)?.index()].fetch_add(1, Ordering::Relaxed);
+            state.depths[lane_of(&key)].fetch_add(1, Ordering::Relaxed);
             state
                 .next_sequence
                 .fetch_max(sequence(&key) + 1, Ordering::Relaxed);
@@ -77,8 +73,25 @@ impl Store {
         jobs: Vec<Job>,
         position: Option<Position>,
     ) -> Result<(), Error> {
+        self.add(lane.index(), &jobs, position)
+    }
+
+    pub fn enqueue_feed(
+        &self,
+        jobs: Vec<LabelJob>,
+        position: Option<Position>,
+    ) -> Result<(), Error> {
+        self.add(FEED_LANE, &jobs, position)
+    }
+
+    fn add<T: Serialize>(
+        &self,
+        lane: usize,
+        jobs: &[T],
+        position: Option<Position>,
+    ) -> Result<(), Error> {
         let mut batch = self.database.batch();
-        for job in &jobs {
+        for job in jobs {
             let value = postcard::to_stdvec(job)?;
             batch.insert(&self.queue, self.next_key(lane), value);
         }
@@ -98,8 +111,21 @@ impl Store {
             None => {}
         }
         batch.commit()?;
-        self.queue_state.depths[lane.index()].fetch_add(jobs.len(), Ordering::Relaxed);
+        self.queue_state.depths[lane].fetch_add(jobs.len(), Ordering::Relaxed);
         Ok(())
+    }
+
+    pub fn next_jobs(&self, limit: usize) -> Result<Vec<Queued>, Error> {
+        let mut jobs = Vec::with_capacity(limit);
+        for lane in Lane::ALL {
+            let remaining = limit - jobs.len();
+            jobs.extend(self.take(lane.index(), remaining)?);
+        }
+        Ok(jobs)
+    }
+
+    pub fn next_feed_jobs(&self, limit: usize) -> Result<Vec<Queued<LabelJob>>, Error> {
+        self.take(FEED_LANE, limit)
     }
 
     // Reading past tombstones is a classic issue with persisted job queues.
@@ -107,38 +133,42 @@ impl Store {
     // the head of each lane at startup and then keep track of it. The downside to this
     // is that if a job is picked up and never finished, we wouldn't find out until the
     // next restart.
-    pub fn next_jobs(&self, limit: usize) -> Result<Vec<Queued>, Error> {
-        let mut jobs = Vec::with_capacity(limit);
-        for lane in Lane::ALL {
-            let head = &self.queue_state.heads[lane.index()];
-            let from = key(lane, head.load(Ordering::Relaxed));
-            let remaining = limit - jobs.len();
-            for entry in self.queue.range(from..=key(lane, u64::MAX)).take(remaining) {
-                let (key, value) = entry.into_inner()?;
-                let key = parse_key(&key)?;
-                let job = postcard::from_bytes(&value)?;
-                head.store(sequence(&key) + 1, Ordering::Relaxed);
-                jobs.push(Queued { key, job });
-            }
+    fn take<T: DeserializeOwned>(
+        &self,
+        lane: usize,
+        limit: usize,
+    ) -> Result<Vec<Queued<T>>, Error> {
+        let head = &self.queue_state.heads[lane];
+        let from = key(lane, head.load(Ordering::Relaxed));
+        let mut jobs = Vec::new();
+        for entry in self.queue.range(from..=key(lane, u64::MAX)).take(limit) {
+            let (key, value) = entry.into_inner()?;
+            let key = parse_key(&key)?;
+            let job = postcard::from_bytes(&value)?;
+            head.store(sequence(&key) + 1, Ordering::Relaxed);
+            jobs.push(Queued { key, job });
         }
         Ok(jobs)
     }
 
-    pub fn finish(&self, jobs: &[Queued]) -> Result<(), Error> {
+    pub fn finish<T>(&self, jobs: &[Queued<T>]) -> Result<(), Error> {
         let mut batch = self.database.batch();
         for job in jobs {
             batch.remove(&self.queue, job.key);
         }
         batch.commit()?;
         for job in jobs {
-            let lane = Lane::of(&job.key)?;
-            self.queue_state.depths[lane.index()].fetch_sub(1, Ordering::Relaxed);
+            self.queue_state.depths[lane_of(&job.key)].fetch_sub(1, Ordering::Relaxed);
         }
         Ok(())
     }
 
     pub fn queue_depth(&self, lane: Lane) -> usize {
         self.queue_state.depths[lane.index()].load(Ordering::Relaxed)
+    }
+
+    pub fn feed_depth(&self) -> usize {
+        self.queue_state.depths[FEED_LANE].load(Ordering::Relaxed)
     }
 
     pub fn jetstream_position(&self) -> Result<Option<u64>, Error> {
@@ -162,7 +192,7 @@ impl Store {
         Ok(postcard::from_bytes(&bytes)?)
     }
 
-    fn next_key(&self, lane: Lane) -> Key {
+    fn next_key(&self, lane: usize) -> Key {
         let sequence = self
             .queue_state
             .next_sequence
@@ -171,15 +201,23 @@ impl Store {
     }
 }
 
-fn key(lane: Lane, sequence: u64) -> Key {
+fn key(lane: usize, sequence: u64) -> Key {
     let mut key = [0; KEY_LEN];
-    key[0] = lane.index() as u8;
+    key[0] = lane as u8;
     key[1..].copy_from_slice(&sequence.to_be_bytes());
     key
 }
 
 fn parse_key(bytes: &[u8]) -> Result<Key, Error> {
-    bytes.try_into().map_err(|_| Error::BadQueueKey)
+    let key: Key = bytes.try_into().map_err(|_| Error::BadQueueKey)?;
+    if lane_of(&key) >= LANES {
+        return Err(Error::BadQueueKey);
+    }
+    Ok(key)
+}
+
+fn lane_of(key: &Key) -> usize {
+    usize::from(key[0])
 }
 
 fn sequence(key: &Key) -> u64 {
@@ -236,6 +274,23 @@ mod tests {
 
         let jobs = store.next_jobs(10).unwrap();
         assert_eq!(names(&jobs), ["did:plc:new", "did:plc:old"]);
+    }
+
+    #[test]
+    fn the_feed_lane_holds_label_jobs_apart_from_jobs_to_refresh() {
+        let (_dir, store) = open();
+        let labels = LabelJob {
+            did: job("labelled").did,
+            records: Vec::new(),
+        };
+
+        store.enqueue_feed(vec![labels.clone()], None).unwrap();
+        store.enqueue(Lane::Live, vec![job("new")], None).unwrap();
+
+        assert_eq!(names(&store.next_jobs(10).unwrap()), ["did:plc:new"]);
+        let fed = store.next_feed_jobs(10).unwrap();
+        assert_eq!(fed[0].job, labels);
+        assert_eq!(store.feed_depth(), 1);
     }
 
     #[test]

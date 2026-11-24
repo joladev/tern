@@ -11,7 +11,7 @@ use types::{Datetime, Did, Handle, Label, VerificationState};
 pub use reader::Reader;
 pub use writer::Writer;
 
-const FORMAT: u32 = 7;
+const FORMAT: u32 = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

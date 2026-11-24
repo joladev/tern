@@ -6,6 +6,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 const INVALID_HANDLE: &str = "handle.invalid";
+const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
+const PROFILE_RKEY: &str = "self";
+const EPOCH: &str = "1970-01-01T00:00:00.000Z";
 const MAX_DISPLAY_NAME_BYTES: usize = 640;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -194,6 +197,34 @@ pub struct Verification {
 pub struct Profile {
     pub display_name: Option<String>,
     pub avatar_cid: Option<String>,
+    pub self_labels: Option<SelfLabels>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SelfLabels {
+    pub values: Vec<String>,
+    pub cid: Option<String>,
+    pub created_at: Option<Datetime>,
+}
+
+impl SelfLabels {
+    pub fn labels(&self, did: &Did) -> Vec<Label> {
+        // Self-labels don't have a timestamp, but the external label format expects it.
+        // Bluesky handle this by setting it to the createdAt of the profile, and if it
+        // doesn't exist, defaults to `1970-01-01`.
+        let cts = self.created_at.clone().unwrap_or_else(|| {
+            Datetime::try_from(EPOCH.to_owned()).expect("the epoch is a valid time")
+        });
+        let label = |val: &String| Label {
+            src: did.clone(),
+            uri: format!("at://{did}/{PROFILE_COLLECTION}/{PROFILE_RKEY}"),
+            cid: self.cid.clone(),
+            val: val.clone(),
+            cts: cts.clone(),
+            exp: None,
+        };
+        self.values.iter().map(label).collect()
+    }
 }
 
 pub fn display_name(name: Option<String>) -> Option<String> {
@@ -207,6 +238,19 @@ pub fn display_name(name: Option<String>) -> Option<String> {
 pub struct ProfileRecord {
     display_name: Option<String>,
     avatar: Option<Blob>,
+    labels: Option<RecordLabels>,
+    created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecordLabels {
+    #[serde(default)]
+    values: Vec<RecordLabel>,
+}
+
+#[derive(Deserialize)]
+struct RecordLabel {
+    val: String,
 }
 
 #[derive(Deserialize)]
@@ -231,11 +275,26 @@ struct BlobRef {
     link: String,
 }
 
-impl From<ProfileRecord> for Profile {
-    fn from(record: ProfileRecord) -> Profile {
+impl Profile {
+    pub fn from_record(record: ProfileRecord, cid: Option<String>) -> Profile {
+        let labels = record.labels.map(|labels| labels.values);
+        let values: Vec<String> = labels
+            .unwrap_or_default()
+            .into_iter()
+            .map(|label| label.val)
+            .collect();
+        let created_at = record
+            .created_at
+            .and_then(|time| Datetime::try_from(time).ok());
+        let self_labels = (!values.is_empty()).then_some(SelfLabels {
+            values,
+            cid,
+            created_at,
+        });
         Profile {
             display_name: display_name(record.display_name),
             avatar_cid: record.avatar.map(Blob::into_cid),
+            self_labels,
         }
     }
 }
@@ -248,6 +307,25 @@ pub struct Label {
     pub val: String,
     pub cts: Datetime,
     pub exp: Option<Datetime>,
+}
+
+impl Label {
+    pub fn is_same_label(&self, other: &Label) -> bool {
+        (&self.src, &self.uri, &self.cid, &self.val)
+            == (&other.src, &other.uri, &other.cid, &other.val)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LabelRecord {
+    pub label: Label,
+    pub withdrawn: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LabelJob {
+    pub did: Did,
+    pub records: Vec<LabelRecord>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -275,7 +353,6 @@ pub struct Facts {
     pub profile: Option<Profile>,
     pub status: Option<Status>,
     pub enrichment: Option<Enrichment>,
-    pub labels: Option<Vec<Label>>,
     pub verification: Option<Option<AppviewVerification>>,
 }
 
@@ -286,7 +363,6 @@ impl Facts {
             profile: self.profile.or(other.profile),
             status: self.status.or(other.status),
             enrichment: self.enrichment.or(other.enrichment),
-            labels: self.labels.or(other.labels),
             verification: self.verification.or(other.verification),
         }
     }
@@ -324,6 +400,27 @@ mod tests {
         let name = display_name(Some("東".repeat(300))).unwrap();
         assert_eq!(name, "東".repeat(213));
         assert_eq!(display_name(Some(String::new())), None);
+    }
+
+    #[test]
+    fn self_labels_become_labels_issued_by_the_account() {
+        let did = Did::try_from("did:plc:alice".to_owned()).unwrap();
+        let self_labels = SelfLabels {
+            values: vec!["porn".to_owned()],
+            cid: Some("bafyrei".to_owned()),
+            created_at: None,
+        };
+
+        let labels = self_labels.labels(&did);
+
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].src, did);
+        assert_eq!(
+            labels[0].uri,
+            "at://did:plc:alice/app.bsky.actor.profile/self"
+        );
+        assert_eq!(labels[0].val, "porn");
+        assert_eq!(labels[0].cts.as_str(), "1970-01-01T00:00:00.000Z");
     }
 
     #[test]

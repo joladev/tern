@@ -56,7 +56,6 @@ fn facts_for(dids: &[Did], views: Vec<ProfileView>) -> HashMap<Did, Facts> {
             let facts = match views.remove(did) {
                 Some(view) => Facts {
                     enrichment: Some(view.enrichment),
-                    labels: Some(view.labels),
                     verification: Some(view.verification),
                     ..Facts::default()
                 },
@@ -87,7 +86,6 @@ mod tests {
                 followers: 5,
                 created_at: None,
             },
-            labels: Vec::new(),
             verification: None,
         };
 
@@ -95,7 +93,6 @@ mod tests {
 
         let known_facts = Facts {
             enrichment: Some(known.enrichment),
-            labels: Some(Vec::new()),
             verification: Some(None),
             ..Facts::default()
         };

@@ -27,6 +27,14 @@ pub fn router(reader: Reader) -> Router {
             get(typeahead),
         )
         .route("/xrpc/app.bsky.actor.searchActorsTypeahead", get(typeahead))
+        .route(
+            "/xrpc/town.cove.identity.resolveHandle",
+            get(resolve_handle),
+        )
+        .route(
+            "/xrpc/com.atproto.identity.resolveHandle",
+            get(resolve_handle),
+        )
         .route("/xrpc/town.cove.actor.getStats", get(stats))
         .route("/xrpc/_health", get(health))
         .layer(cors())
@@ -205,6 +213,38 @@ async fn typeahead(
     Ok(Json(TypeaheadResponse { actors }))
 }
 
+#[derive(Deserialize)]
+struct ResolveHandleParams {
+    handle: String,
+}
+
+#[derive(Serialize)]
+struct ResolveHandleResponse {
+    did: Did,
+}
+
+async fn resolve_handle(
+    State(reader): State<Reader>,
+    params: Result<Query<ResolveHandleParams>, QueryRejection>,
+) -> Result<Json<ResolveHandleResponse>, XrpcError> {
+    let Query(params) =
+        params.map_err(|rejection| XrpcError::InvalidRequest(rejection.body_text()))?;
+    let handle = Handle::try_from(params.handle)
+        .map_err(|_| XrpcError::InvalidRequest("invalid handle".to_owned()))?;
+
+    let start = Instant::now();
+    let did = tokio::task::spawn_blocking(move || reader.resolve_handle(&handle))
+        .await
+        .map_err(|err| XrpcError::Internal(err.into()))?
+        .map_err(|err| XrpcError::Internal(err.into()))?;
+    metrics::histogram!("tern_resolve_handle_seconds").record(start.elapsed());
+
+    match did {
+        Some(did) => Ok(Json(ResolveHandleResponse { did })),
+        None => Err(XrpcError::HandleNotFound),
+    }
+}
+
 #[derive(Serialize)]
 struct StatsResponse {
     index: IndexStats,
@@ -233,6 +273,7 @@ async fn render_metrics(State(exporter): State<Arc<Exporter>>) -> String {
 enum XrpcError {
     InvalidRequest(String),
     Internal(anyhow::Error),
+    HandleNotFound,
 }
 
 #[derive(Serialize)]
@@ -248,13 +289,18 @@ impl IntoResponse for XrpcError {
                 (StatusCode::BAD_REQUEST, "InvalidRequest", message)
             }
             XrpcError::Internal(err) => {
-                tracing::error!("search failed: {err:#}");
+                tracing::error!("request failed: {err:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "InternalServerError",
-                    "search failed".to_owned(),
+                    "request failed".to_owned(),
                 )
             }
+            XrpcError::HandleNotFound => (
+                StatusCode::BAD_REQUEST,
+                "HandleNotFound",
+                "handle not found".to_owned(),
+            ),
         };
         (status, Json(XrpcErrorBody { error, message })).into_response()
     }

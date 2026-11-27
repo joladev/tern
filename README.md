@@ -16,9 +16,11 @@ Account updates are automatically discovered through the jetstream and a handle 
 
 Ranking uses a mix of account age and Bluesky follower count, with bonuses for prefix matches and exact handles. I've tried to aim for supporting display name search, but my assumption is that most people type their handle, not their name, so that's what I've optimized for.
 
-### API
+## API
 
-Exposes a single public unauthenticated endpoint: `GET /xrpc/town.cove.actor.searchActorsTypeahead` with CORS enabled.
+Tern exposes a few different endpoints, each with CORS enabled.
+
+### `GET /xrpc/town.cove.actor.searchActorsTypeahead`
 
 Query params:
 * `q` - the search query, eg `lewis` or `nel.pet`.
@@ -42,6 +44,21 @@ Example response
 ```
 
 There's also an `app.bsky.actor.searchActorsTypeahead` alias.
+
+### `GET /xrpc/town.cove.identity.resolveHandle`
+
+Convert any atproto handle into a did, using tern's index.
+
+Query params:
+* `handle` - the handle you're resolving, eg `nel.pet`.
+
+```json
+{
+  "did": "did:plc:h5wsnqetncv6lu2weom35lg2"
+}
+```
+
+There's also a `com.atproto.identity.resolveHandle` alias.
 
 ## Design
 

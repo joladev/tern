@@ -229,6 +229,24 @@ impl Reader {
             verification,
         })
     }
+
+    pub fn resolve_handle(&self, handle: &Handle) -> Result<Option<Did>, Error> {
+        let exact = self.term_query(&Kind::Exact.term(handle.as_str()));
+        let snapshot = self.snapshot.load();
+        let matches = snapshot.top_matches(exact.as_ref(), 1)?;
+        match matches.first() {
+            Some(m) => {
+                let doc: TantivyDocument = snapshot.searcher.doc(m.address)?;
+                let text = |field: Field| doc.get_first(field).and_then(|value| value.as_str());
+
+                let did = text(self.fields.did)
+                    .and_then(|did| Did::try_from(did.to_owned()).ok())
+                    .ok_or(Error::BadDocument("did"))?;
+                Ok(Some(did))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 fn is_domain(word: &str) -> bool {

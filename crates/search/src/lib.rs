@@ -29,6 +29,8 @@ pub enum Error {
     BadPayload(String),
     #[error("no rebuild is running")]
     NotRebuilding,
+    #[error("not found")]
+    NotFound,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,5 +378,32 @@ mod tests {
         assert!(writer.needs_rebuild());
         assert!(!dir.path().join("index-b").exists());
         assert_eq!(handles(&reader, "liddell", 10), ["alice.bsky.social"]);
+    }
+
+    #[test]
+    fn exact_match_resolution_doesnt_match_prefix() {
+        let (reader, mut writer) = open_index();
+        writer.upsert(&actor("alice", None), 1).unwrap();
+        writer.commit().unwrap();
+
+        let prefix = Handle::try_from("alice.bsky".to_owned()).unwrap();
+
+        assert_eq!(reader.resolve_handle(&prefix).expect("doesn't error"), None);
+    }
+
+    #[test]
+    fn higher_score_wins_exact_match_resolution() {
+        let (reader, mut writer) = open_index();
+        writer.upsert(&actor("alice", None), 1).unwrap();
+        let bigger = actor_with_handle("big", "alice.bsky.social", None);
+        writer.upsert(&bigger, 100).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(
+            reader
+                .resolve_handle(&bigger.handle)
+                .expect("doesn't error"),
+            Some(bigger.did)
+        );
     }
 }

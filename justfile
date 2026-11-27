@@ -1,8 +1,8 @@
 default:
     @just --list
 
-test:
-    cargo nextest run --workspace --exclude integration
+test *args:
+    cargo nextest run --workspace --exclude integration {{args}}
 
 integration:
     #!/usr/bin/env bash

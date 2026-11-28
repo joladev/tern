@@ -169,8 +169,9 @@ impl Account {
     }
 }
 
-/// The AppView judges a verification against the account's handle and display
-/// name, so its verdict only holds while both are unchanged.
+/// A verification is for one handle and one display name. If the account changes either,
+/// the verification no longer applies. We store that handle and name next to the
+/// verification, and only show it while the account still has both.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AppviewVerification {
     pub handle: Option<Handle>,

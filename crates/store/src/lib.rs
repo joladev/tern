@@ -1,3 +1,4 @@
+mod codec;
 mod migration;
 mod queue;
 
@@ -27,6 +28,8 @@ pub enum Error {
     BadQueueKey,
     #[error("the store has format {0}, which this build does not support")]
     UnsupportedFormat(u32),
+    #[error("found a stored `{kind}` with version {version}, which this build does not support")]
+    UnsupportedVersion { kind: &'static str, version: u8 },
 }
 
 pub struct StoredAccount {
@@ -89,7 +92,7 @@ impl Store {
         let Some(bytes) = self.accounts.get(did.as_str())? else {
             return Ok(None);
         };
-        Ok(Some(postcard::from_bytes(&bytes)?))
+        Ok(Some(codec::decode(&bytes)?))
     }
 
     pub fn enrichment(&self, did: &Did) -> Result<Enrichment, Error> {
@@ -98,7 +101,7 @@ impl Store {
     }
 
     pub fn put_account(&self, did: &Did, account: &Account) -> Result<(), Error> {
-        let value = postcard::to_stdvec(account)?;
+        let value = codec::encode(account)?;
         Ok(self.accounts.insert(did.as_str(), value)?)
     }
 
@@ -108,7 +111,7 @@ impl Store {
             ..Account::default()
         };
         let mut batch = self.database.batch();
-        batch.insert(&self.accounts, did.as_str(), postcard::to_stdvec(&blank)?);
+        batch.insert(&self.accounts, did.as_str(), codec::encode(&blank)?);
         batch.remove(&self.enrichment, did.as_str());
         Ok(batch.commit()?)
     }
@@ -129,7 +132,7 @@ impl Store {
             }
         }
         if kept != stored {
-            let value = postcard::to_stdvec(&kept)?;
+            let value = codec::encode(&kept)?;
             self.labels.insert(did.as_str(), value)?;
         }
         Ok(())
@@ -143,7 +146,7 @@ impl Store {
         let Some(bytes) = self.labels.get(did.as_str())? else {
             return Ok(Vec::new());
         };
-        Ok(postcard::from_bytes(&bytes)?)
+        codec::decode(&bytes)
     }
 
     pub fn put_enrichment(
@@ -156,7 +159,7 @@ impl Store {
             enrichment: enrichment.clone(),
             fetched_at,
         };
-        let value = postcard::to_stdvec(&row)?;
+        let value = codec::encode(&row)?;
         Ok(self.enrichment.insert(did.as_str(), value)?)
     }
 
@@ -174,7 +177,7 @@ impl Store {
         rows.into_iter()
             .map(|(did, account, row)| {
                 let labels = value_for(&mut labels, did.as_str().as_bytes())?
-                    .map(|bytes| postcard::from_bytes(&bytes))
+                    .map(|bytes| codec::decode(&bytes))
                     .transpose()?
                     .map(live)
                     .unwrap_or_default();
@@ -228,9 +231,9 @@ impl Store {
         for entry in accounts.take(limit) {
             let (did, account) = entry.into_inner()?;
             let row = value_for(&mut enrichment, &did)?
-                .map(|bytes| postcard::from_bytes(&bytes))
+                .map(|bytes| codec::decode(&bytes))
                 .transpose()?;
-            let account = postcard::from_bytes(&account)?;
+            let account = codec::decode(&account)?;
             rows.push((did_from_bytes(&did)?, account, row));
         }
         Ok(rows)
@@ -240,7 +243,7 @@ impl Store {
         let Some(bytes) = self.enrichment.get(did.as_str())? else {
             return Ok(None);
         };
-        Ok(Some(postcard::from_bytes(&bytes)?))
+        Ok(Some(codec::decode(&bytes)?))
     }
 }
 

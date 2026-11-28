@@ -1,15 +1,14 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fjall::Keyspace;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use types::{Did, Job, LabelJob};
 
+use crate::codec::{self, Stored};
 use crate::{BackfillProgress, Error, Store};
 
 const JETSTREAM_POSITION: &str = "position:jetstream";
-const BACKFILL_POSITION: &str = "position:backfill";
-const STALE_POSITION: &str = "position:stale";
+pub(crate) const BACKFILL_POSITION: &str = "position:backfill";
+pub(crate) const STALE_POSITION: &str = "position:stale";
 const LABELER_POSITION: &str = "position:labeler:";
 const KEY_LEN: usize = 9;
 const FEED_LANE: usize = 2;
@@ -86,7 +85,7 @@ impl Store {
         self.add(FEED_LANE, &jobs, position)
     }
 
-    fn add<T: Serialize>(
+    fn add<T: Stored>(
         &self,
         lane: usize,
         jobs: &[T],
@@ -94,24 +93,24 @@ impl Store {
     ) -> Result<(), Error> {
         let mut batch = self.database.batch();
         for job in jobs {
-            let value = postcard::to_stdvec(job)?;
+            let value = codec::encode(job)?;
             batch.insert(&self.queue, self.next_key(lane), value);
         }
         match position {
             Some(Position::Jetstream(cursor)) => {
-                let value = postcard::to_stdvec(&cursor)?;
+                let value = codec::encode(&cursor)?;
                 batch.insert(&self.meta, JETSTREAM_POSITION, value);
             }
             Some(Position::Backfill(progress)) => {
-                let value = postcard::to_stdvec(&progress)?;
+                let value = codec::encode(&progress)?;
                 batch.insert(&self.meta, BACKFILL_POSITION, value);
             }
             Some(Position::Stale(after)) => {
-                let value = postcard::to_stdvec(&after)?;
+                let value = codec::encode(&after)?;
                 batch.insert(&self.meta, STALE_POSITION, value);
             }
             Some(Position::Labeler { labeler, seq }) => {
-                let value = postcard::to_stdvec(&seq)?;
+                let value = codec::encode(&seq)?;
                 batch.insert(&self.meta, labeler_position_key(&labeler), value);
             }
             None => {}
@@ -139,18 +138,14 @@ impl Store {
     // the head of each lane at startup and then keep track of it. The downside to this
     // is that if a job is picked up and never finished, we wouldn't find out until the
     // next restart.
-    fn take<T: DeserializeOwned>(
-        &self,
-        lane: usize,
-        limit: usize,
-    ) -> Result<Vec<Queued<T>>, Error> {
+    fn take<T: Stored>(&self, lane: usize, limit: usize) -> Result<Vec<Queued<T>>, Error> {
         let head = &self.queue_state.heads[lane];
         let from = key(lane, head.load(Ordering::Relaxed));
         let mut jobs = Vec::new();
         for entry in self.queue.range(from..=key(lane, u64::MAX)).take(limit) {
             let (key, value) = entry.into_inner()?;
             let key = parse_key(&key)?;
-            let job = postcard::from_bytes(&value)?;
+            let job = codec::decode(&value)?;
             head.store(sequence(&key) + 1, Ordering::Relaxed);
             jobs.push(Queued { key, job });
         }
@@ -181,28 +176,28 @@ impl Store {
         let Some(bytes) = self.meta.get(JETSTREAM_POSITION)? else {
             return Ok(None);
         };
-        Ok(Some(postcard::from_bytes(&bytes)?))
+        Ok(Some(codec::decode(&bytes)?))
     }
 
     pub fn backfill_position(&self) -> Result<BackfillProgress, Error> {
         let Some(bytes) = self.meta.get(BACKFILL_POSITION)? else {
             return Ok(BackfillProgress::default());
         };
-        Ok(postcard::from_bytes(&bytes)?)
+        codec::decode(&bytes)
     }
 
     pub fn stale_position(&self) -> Result<Option<Did>, Error> {
         let Some(bytes) = self.meta.get(STALE_POSITION)? else {
             return Ok(None);
         };
-        Ok(postcard::from_bytes(&bytes)?)
+        codec::decode(&bytes)
     }
 
     pub fn labeler_position(&self, labeler: &Did) -> Result<Option<u64>, Error> {
         let Some(bytes) = self.meta.get(labeler_position_key(labeler))? else {
             return Ok(None);
         };
-        Ok(Some(postcard::from_bytes(&bytes)?))
+        Ok(Some(codec::decode(&bytes)?))
     }
 
     fn next_key(&self, lane: usize) -> Key {
@@ -235,6 +230,10 @@ fn parse_key(bytes: &[u8]) -> Result<Key, Error> {
 
 fn lane_of(key: &Key) -> usize {
     usize::from(key[0])
+}
+
+pub(crate) fn in_feed_lane(key: &[u8]) -> Result<bool, Error> {
+    Ok(lane_of(&parse_key(key)?) == FEED_LANE)
 }
 
 fn sequence(key: &Key) -> u64 {
@@ -294,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn the_feed_lane_holds_label_jobs_apart_from_jobs_to_refresh() {
+    fn the_feed_lane_contains_label_jobs_apart_from_jobs_to_refresh() {
         let (_dir, store) = open();
         let labels = LabelJob {
             did: job("labelled").did,
